@@ -1,0 +1,156 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "logLevel": "DEBUG",
+  "default_agent": "orquestrador",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "edit": "allow",
+    "bash": "allow",
+    "task": "deny"
+  },
+
+  "provider": {
+    "opencode": {
+      "options": {
+        "headerTimeout": 30000,
+        "chunkTimeout": 60000
+      }
+    }
+  },
+
+  "mcp": {
+    "gitnexus": {
+      "type": "local",
+      "command": ["node", "/home/leandro/projetos/tecladista-ia/.gitnexus/run.cjs", "mcp"],
+      "enabled": true,
+      "environment": {
+        "GITNEXUS_MCP_READ_ONLY": "1",
+        "GITNEXUS_MCP_DEFAULT_REPO": "tecladista-ia"
+      }
+    }
+  },
+
+  "agent": {
+    "orquestrador": {
+      "description": "Orquestrador principal — analisa a tarefa e delega para o subagente especializado (frontend, revisão). Quality gate automático substitui os agentes de QA.",
+      "mode": "primary",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "docs/**": "allow",
+          "PLANO_IMPLEMENTACAO.md": "allow",
+          "**/*.md": "allow",
+          ".opencode/**": "deny",
+          ".gitnexus/**": "deny",
+          "node_modules/**": "deny"
+        },
+        "bash": {
+          "*": "deny",
+          "gitnexus*": "allow",
+          "node .gitnexus/run.cjs*": "allow",
+          "mkdir*": "allow"
+        },
+        "task": {
+          "dev-frontend": "allow",
+          "code-reviewer": "allow"
+        }
+      },
+      "prompt": "Use o agente orquestrador em .opencode/agents/orquestrador.md"
+    },
+    "dev-frontend": {
+      "description": "Especialista frontend React/TS — componentes, páginas, stores, hooks, API services, Tailwind v4",
+      "mode": "subagent",
+      "permission": {
+        "edit": "allow",
+        "bash": {
+          "*": "allow",
+          "npm run build*": "deny",
+          "npm run test*": "deny",
+          "npm test*": "deny",
+          "npm run test:coverage*": "deny",
+          "npx vitest*": "deny",
+          "npx vitest run*": "allow",
+          "npx cypress*": "deny",
+          "npx cypress run*": "allow",
+          "git commit*": "deny",
+          "git push*": "deny",
+          "git add*": "deny",
+          "python3 .opencode/skills/*": "allow",
+          "python .opencode/skills/*": "allow",
+          "node .opencode/skills/*": "allow",
+          "npx impeccable*": "allow"
+        }
+      },
+      "prompt": "Use o agente frontend em .opencode/agents/dev-frontend.md"
+    },
+    "code-reviewer": {
+      "description": "Revisor de código — verifica qualidade, segurança, arquitetura antes de commit",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "gitnexus*": "allow",
+          "git diff*": "allow",
+          "git status*": "allow",
+          "git log*": "allow",
+          "git show*": "allow",
+          "git add*": "allow",
+          "git commit*": "allow",
+          "git push*": "allow",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "ls*": "allow",
+          "cat*": "allow",
+          "head*": "allow",
+          "tail*": "allow",
+          "grep*": "allow",
+          "rg*": "allow",
+          "find*": "allow",
+          "wc*": "allow",
+          "pwd*": "allow"
+        }
+      },
+      "prompt": "Use o agente code-reviewer em .opencode/agents/code-reviewer.md"
+    }
+  },
+
+  "skills": {
+    "paths": [".opencode/skills"]
+  },
+
+  "command": {
+    "review": {
+      "description": "Pipeline completa de revisão (detect + review + build/teste se preciso)",
+      "template": "Execute o comando review-tecladista"
+    },
+    "build": {
+      "description": "Compila o app (erros TypeScript + Vite)",
+      "template": "Execute o comando build-tecladista"
+    },
+    "test": {
+      "description": "Executa testes unitários + cobertura e reporta resultado por arquivo",
+      "template": "Execute o comando test-tecladista"
+    },
+    "tdd": {
+      "description": "Pipeline TDD completo: teste → implementa → refatora → revisa",
+      "template": "Execute o comando tdd-tecladista"
+    },
+    "e2e": {
+      "description": "Executa testes E2E Cypress e reporta resultado",
+      "template": "Execute o comando e2e-tecladista"
+    },
+    "commit": {
+      "description": "Prepara e executa commit com revisão + testes",
+      "template": "Execute o comando commit-tecladista"
+    }
+  },
+
+  "references": {
+    "docs": {
+      "path": ".",
+      "description": "Use for project documentation, guides, and architecture rules",
+      "hidden": true
+    }
+  }
+}
