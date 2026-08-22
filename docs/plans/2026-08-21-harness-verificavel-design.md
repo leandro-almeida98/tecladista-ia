@@ -53,6 +53,20 @@ Converter as regras de prosa do pipeline multi-agente em mecanismos verificávei
 | MODIF | `.opencode/plugins/pipeline-orchestrator.ts` — integra registry + export `__internals` |
 | MODIF | `.gitignore`, `AGENTS.md`, `.opencode/agents/orquestrador.md` |
 
+## FASE 2 — decisões (aprovadas em 2026-08-21)
+
+- **planejamento→dev**: criação de entrada exige design doc (`docs/plans/YYYY-MM-DD-*-design.md`)
+  extraído dos args da task E existente em disco; ausente → bloqueio nomeando a pré-condição.
+- **dev→reviewer**: gate atual roda; cada step vira `GateResult` gravado em `entry.gateResults`.
+- **reviewer→final**: after-hook intercepta tool `detect_changes` bem-sucedida → grava
+  `entry.detectChangesReport`.
+- **commit**: guarda no hook `bash` — `git commit/push` do code-reviewer exige
+  `detectChangesReport` E `aprovacaoHumana`; `git add` exige entrada ativa.
+- **aprovacaoHumana mecânico**: after-hook na tool `question` — pergunta casa `/commit|push/i`
+  + label afirmativo → `{por:'usuario', em}` (fail-safe).
+- Dívidas FASE 1 quitadas: W2 (invariante violada bloqueia tudo até correção manual do state),
+  `OPTIONS.allowedTargets`, validação de shape de `gateResults`.
+
 ## Limitação GitNexus documentada
 
 Índice não cobre `.opencode/plugins/*.ts` (`impact(PipelineOrchestrator)` → not found,

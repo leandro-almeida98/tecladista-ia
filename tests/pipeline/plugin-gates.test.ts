@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
-import { createEntry, readRegistry, writeRegistry } from "../../.opencode/pipeline/registry"
+import { createEntry, readRegistry, writeRegistry, type RegistryEntry } from "../../.opencode/pipeline/registry"
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>()
@@ -740,10 +740,13 @@ describe("hooks do plugin — transição de gate", () => {
     expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
   })
 
-  test("deveSeguirSemGate_quandoDelegaOutroAgenteComEntradaAtiva", async () => {
+  test("deveBloquearTargetNaoAutorizado_mesmoComEntradaAtiva_FASE2", async () => {
     criarTarefaAtiva()
     const hooks = await makeHooks()
-    await expect(callBefore(hooks, "task", { subagent_type: "git-committer" })).resolves.toBeUndefined()
+    // FASE 2: allowedTargets restringe delegação a dev-frontend/code-reviewer.
+    await expect(callBefore(hooks, "task", { subagent_type: "git-committer" })).rejects.toThrow(
+      /não autorizado/,
+    )
   })
 
   test("deveIgnorarRegistryEGate_quandoTargetVazio", async () => {
@@ -773,8 +776,15 @@ describe("hooks do plugin — finish e bloqueio de push", () => {
     expect(messages().some((m) => m.includes("Finish do"))).toBe(false)
   })
 
-  test("naoDeveInterferir_noPush_quandoFlagDesativada", async () => {
+  test("naoDeveInterferir_noPush_quandoFlagDesativada_ePreCondicoesOk", async () => {
     expect(__internals.OPTIONS.blockGitPushForReviewer).toBe(false)
+    // FASE 2: guarda bash exige report + aprovação p/ commit/push do reviewer.
+    const entry: RegistryEntry = {
+      ...createEntry({ feature: "Feature push ok" }),
+      detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW", changedCount: 2 },
+      aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+    }
+    writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
     sessionGetImpl = async () => ({ agent: "code-reviewer" })
     const hooks = await makeHooks()
     await expect(callBefore(hooks, "bash", { command: "git push origin main" })).resolves.toBeUndefined()
@@ -785,6 +795,14 @@ describe("hooks do plugin — finish e bloqueio de push", () => {
     const original = opt.blockGitPushForReviewer
     opt.blockGitPushForReviewer = true
     try {
+      // FASE 2: guarda do registry roda ANTES do flag legacy — satisfazer as
+      // pré-condições para alcançar o bloqueio legacy de push.
+      const entry: RegistryEntry = {
+        ...createEntry({ feature: "Feature push flag" }),
+        detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW", changedCount: 2 },
+        aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+      }
+      writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
       sessionGetImpl = async () => ({ agent: "code-reviewer" })
       const hooks = await makeHooks()
       await expect(callBefore(hooks, "bash", { command: "git push origin main" })).rejects.toThrow(

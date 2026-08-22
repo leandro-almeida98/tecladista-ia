@@ -22,13 +22,17 @@ vi.mock("node:fs", async (importOriginal) => {
 })
 
 import {
+  aprovar,
   createEntry,
   getActiveEntry,
   isActive,
   readRegistry,
+  registrarDetectChanges,
+  registrarGateResult,
   updateEntry,
   validateEntry,
   writeRegistry,
+  type DetectChangesReport,
   type GateResult,
   type PipelineFase,
   type RegistryEntry,
@@ -71,6 +75,8 @@ function validEntry(): RegistryEntry {
     gateResults: [],
     retries: 0,
     aprovacaoHumana: null,
+    designDoc: null,
+    detectChangesReport: null,
   }
 }
 
@@ -159,6 +165,128 @@ describe("validateEntry", () => {
     entry.aprovacaoHumana = "sim"
     expect(() => validateEntry(entry)).toThrow(/aprovacaoHumana/i)
   })
+
+  // ---------------- FASE 2: designDoc / detectChangesReport ----------------
+
+  test("deveAceitarDesignDocStringNaoVazia", () => {
+    const entry = validEntry()
+    entry.designDoc = "docs/plans/2026-08-21-login-design.md"
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveRejeitar_quandoDesignDocTipoInvalido", () => {
+    const entry = validEntry() as unknown as Record<string, unknown>
+    entry.designDoc = 42
+    expect(() => validateEntry(entry)).toThrow(/designDoc/i)
+  })
+
+  test("deveTolerarCamposNovosAusentes_compatEntradasFASE1EmDisco", () => {
+    const entry = validEntry() as unknown as Record<string, unknown>
+    delete entry.designDoc
+    delete entry.detectChangesReport
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveAceitarDetectChangesReportCompleto", () => {
+    const entry = validEntry()
+    entry.detectChangesReport = { ts: "2026-08-21T15:00:00.000Z", riskLevel: "HIGH", changedCount: 12 }
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveAceitarDetectChangesReportMinimo_soTs", () => {
+    const entry = validEntry()
+    entry.detectChangesReport = { ts: "2026-08-21T15:00:00.000Z" }
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveRejeitar_quandoDetectChangesReportSemTs", () => {
+    const entry = validEntry()
+    entry.detectChangesReport = { riskLevel: "LOW" } as DetectChangesReport
+    expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
+  })
+
+  test("deveRejeitar_quandoDetectChangesReportTipoInvalido", () => {
+    const entry = validEntry() as unknown as Record<string, unknown>
+    entry.detectChangesReport = "relatorio"
+    expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
+  })
+
+  test("deveRejeitar_quandoDetectChangesReportRiskLevelNaoString", () => {
+    const entry = validEntry()
+    entry.detectChangesReport = {
+      ts: "2026-08-21T15:00:00.000Z",
+      riskLevel: 3 as unknown as string,
+    }
+    expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
+  })
+
+  test("deveRejeitar_quandoDetectChangesReportChangedCountInvalido", () => {
+    const entry = validEntry()
+    entry.detectChangesReport = {
+      ts: "2026-08-21T15:00:00.000Z",
+      changedCount: -1,
+    }
+    expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
+    entry.detectChangesReport = {
+      ts: "2026-08-21T15:00:00.000Z",
+      changedCount: "muitos" as unknown as number,
+    }
+    expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
+  })
+
+  // ---------------- FASE 2: shape de CADA item de gateResults ----------------
+
+  test("deveAceitarGateResultValido", () => {
+    const entry = validEntry()
+    entry.gateResults = [
+      { step: "build", ok: true, exitCode: 0, ts: "2026-08-21T11:00:00.000Z", detalhe: null },
+    ]
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveRejeitar_quandoGateResultItemNaoEhObjeto", () => {
+    const entry = validEntry()
+    ;(entry.gateResults as unknown[]).push("build ok")
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
+
+  test("deveRejeitar_quandoGateResultItemStepVazio", () => {
+    const entry = validEntry()
+    entry.gateResults = [
+      { step: "", ok: true, exitCode: 0, ts: "2026-08-21T11:00:00.000Z", detalhe: null },
+    ]
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
+
+  test("deveRejeitar_quandoGateResultItemOkNaoBooleano", () => {
+    const entry = validEntry()
+    entry.gateResults = [
+      { step: "build", ok: "sim", exitCode: 0, ts: "2026-08-21T11:00:00.000Z", detalhe: null } as unknown as GateResult,
+    ]
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
+
+  test("deveRejeitar_quandoGateResultItemExitCodeInvalido", () => {
+    const entry = validEntry()
+    entry.gateResults = [
+      { step: "build", ok: true, exitCode: "zero", ts: "2026-08-21T11:00:00.000Z", detalhe: null } as unknown as GateResult,
+    ]
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
+
+  test("deveRejeitar_quandoGateResultItemTsVazio", () => {
+    const entry = validEntry()
+    entry.gateResults = [{ step: "build", ok: true, exitCode: 0, ts: "", detalhe: null }]
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
+
+  test("deveRejeitar_quandoGateResultItemDetalheInvalido", () => {
+    const entry = validEntry()
+    entry.gateResults = [
+      { step: "build", ok: false, exitCode: 2, ts: "2026-08-21T11:00:00.000Z", detalhe: 7 } as unknown as GateResult,
+    ]
+    expect(() => validateEntry(entry)).toThrow(/gateResults/i)
+  })
 })
 
 describe("writeRegistry → readRegistry (roundtrip)", () => {
@@ -175,6 +303,8 @@ describe("writeRegistry → readRegistry (roundtrip)", () => {
     entry.gateResults = [gate]
     entry.retries = 2
     entry.aprovacaoHumana = { por: "leandro", em: "2026-08-21T12:00:00.000Z" }
+    entry.designDoc = "docs/plans/2026-08-21-login-design.md"
+    entry.detectChangesReport = { ts: "2026-08-21T14:00:00.000Z", riskLevel: "LOW", changedCount: 3 }
 
     writeRegistry(statePath, file)
 
@@ -190,6 +320,12 @@ describe("writeRegistry → readRegistry (roundtrip)", () => {
     expect(t.gateResults).toEqual([gate])
     expect(t.retries).toBe(2)
     expect(t.aprovacaoHumana).toEqual({ por: "leandro", em: "2026-08-21T12:00:00.000Z" })
+    expect(t.designDoc).toBe("docs/plans/2026-08-21-login-design.md")
+    expect(t.detectChangesReport).toEqual({
+      ts: "2026-08-21T14:00:00.000Z",
+      riskLevel: "LOW",
+      changedCount: 3,
+    })
   })
 
   test("deveCriarDiretorioPai_quandoStatePathEmSubdiretorioInexistente", () => {
@@ -339,6 +475,20 @@ describe("createEntry", () => {
     expect(entry.feature).toBe("   !!!   ") // feature original preservada
     expect(entry.taskId.startsWith("tarefa-")).toBe(true) // slug padrão
   })
+
+  test("deveGravarDesignDoc_quandoInformado", () => {
+    const entry = createEntry({
+      feature: "Feature com design",
+      designDoc: "docs/plans/2026-08-21-feature-design.md",
+    })
+    expect(entry.designDoc).toBe("docs/plans/2026-08-21-feature-design.md")
+  })
+
+  test("deveInicializarDesignDocNullEDetectChangesReportNull_quandoAusentes", () => {
+    const entry = createEntry({ feature: "Feature sem design" })
+    expect(entry.designDoc).toBeNull()
+    expect(entry.detectChangesReport).toBeNull()
+  })
 })
 
 describe("updateEntry", () => {
@@ -365,6 +515,137 @@ describe("updateEntry", () => {
     expect(() => updateEntry(validFile(), "task-fantasma", { retries: 3 })).toThrow(
       /task-fantasma/,
     )
+  })
+})
+
+describe("registrarGateResult (FASE 2)", () => {
+  test("deveAnexarGateResultEPersistir_quandoTaskIdExiste", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+
+    registrarGateResult(statePath, taskId, {
+      step: "build",
+      ok: true,
+      exitCode: 0,
+      ts: "2026-08-21T11:00:00.000Z",
+      detalhe: null,
+    })
+
+    const t = readRegistry(statePath).tarefas[0] as RegistryEntry
+    expect(t.gateResults).toHaveLength(1)
+    expect(t.gateResults[0]).toEqual({
+      step: "build",
+      ok: true,
+      exitCode: 0,
+      ts: "2026-08-21T11:00:00.000Z",
+      detalhe: null,
+    })
+  })
+
+  test("deveAcumularMultiplosResults_emOrdemDeChamada", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+    registrarGateResult(statePath, taskId, {
+      step: "build",
+      ok: true,
+      exitCode: 0,
+      ts: "2026-08-21T11:00:00.000Z",
+      detalhe: null,
+    })
+    registrarGateResult(statePath, taskId, {
+      step: "test",
+      ok: false,
+      exitCode: 1,
+      ts: "2026-08-21T11:01:00.000Z",
+      detalhe: "2 tests failed",
+    })
+
+    const results = (readRegistry(statePath).tarefas[0] as RegistryEntry).gateResults
+    expect(results.map((r) => r.step)).toEqual(["build", "test"])
+    expect(results[1]?.ok).toBe(false)
+  })
+
+  test("deveLancar_quandoTaskIdInexistente_eNaoGravarNada", () => {
+    writeRegistry(statePath, validFile())
+    expect(() =>
+      registrarGateResult(statePath, "task-fantasma", {
+        step: "build",
+        ok: true,
+        exitCode: 0,
+        ts: "2026-08-21T11:00:00.000Z",
+        detalhe: null,
+      }),
+    ).toThrow(/task-fantasma/)
+  })
+
+  test("deveLancar_quandoResultComShapeInvalido_eManterArquivoIntato", () => {
+    writeRegistry(statePath, validFile())
+    const antes = readFileSync(statePath, "utf-8")
+    expect(() =>
+      registrarGateResult(statePath, (validFile().tarefas[0] as RegistryEntry).taskId, {
+        step: "build",
+        ok: "sim" as unknown as boolean,
+        exitCode: 0,
+        ts: "2026-08-21T11:00:00.000Z",
+        detalhe: null,
+      }),
+    ).toThrow(/gateResults/i)
+    expect(readFileSync(statePath, "utf-8")).toBe(antes)
+  })
+})
+
+describe("registrarDetectChanges (FASE 2)", () => {
+  test("deveGravarReportEPersistir_quandoTaskIdExiste", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+
+    registrarDetectChanges(statePath, taskId, {
+      ts: "2026-08-21T15:00:00.000Z",
+      riskLevel: "HIGH",
+      changedCount: 12,
+    })
+
+    const t = readRegistry(statePath).tarefas[0] as RegistryEntry
+    expect(t.detectChangesReport).toEqual({
+      ts: "2026-08-21T15:00:00.000Z",
+      riskLevel: "HIGH",
+      changedCount: 12,
+    })
+  })
+
+  test("deveSobrescreverReportAnterior_ultimaEscritaVence", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+    registrarDetectChanges(statePath, taskId, { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" })
+    registrarDetectChanges(statePath, taskId, { ts: "2026-08-21T16:00:00.000Z", riskLevel: "CRITICAL" })
+
+    const report = (readRegistry(statePath).tarefas[0] as RegistryEntry).detectChangesReport
+    expect(report?.riskLevel).toBe("CRITICAL")
+  })
+
+  test("deveLancar_quandoTaskIdInexistente", () => {
+    writeRegistry(statePath, validFile())
+    expect(() =>
+      registrarDetectChanges(statePath, "task-fantasma", { ts: "2026-08-21T15:00:00.000Z" }),
+    ).toThrow(/task-fantasma/)
+  })
+})
+
+describe("aprovar (FASE 2)", () => {
+  test("deveSetarAprovacaoHumana_comPorEEmISO_ePersistir", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+
+    aprovar(statePath, taskId, "usuario")
+
+    const aprovacao = (readRegistry(statePath).tarefas[0] as RegistryEntry).aprovacaoHumana
+    expect(aprovacao?.por).toBe("usuario")
+    expect(aprovacao?.em).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+  })
+
+  test("deveLancar_quandoTaskIdInexistente", () => {
+    writeRegistry(statePath, validFile())
+    expect(() => aprovar(statePath, "task-fantasma", "usuario")).toThrow(/task-fantasma/)
   })
 })
 

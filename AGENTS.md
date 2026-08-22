@@ -58,7 +58,7 @@ O agente principal/orquestrador é o único agente autorizado a chamar outros ag
 4. Revisão com `code-reviewer`.
 5. Gate final, `gitnexus_detect_changes` quando disponível e pedido de aprovação antes do commit.
 
-> **Registry mecânico (FASE 1)**: o estado da tarefa vive em `.opencode/pipeline/state.json` e as delegações são validadas mecanicamente pelo plugin — delegar ao dev sem tarefa ativa cria a entrada; delegar a outro agente sem tarefa ativa é bloqueado (`[PIPELINE-REGISTRY]`). Formato de checkpoint `[ORCH][Fase X]` inalterado.
+> **Registry mecânico (FASE 2)**: o estado da tarefa vive em `.opencode/pipeline/state.json` e o plugin valida mecanicamente 4 pré-condições (`[PIPELINE-REGISTRY]`): (1) delegação só a `dev-frontend`/`code-reviewer`; (2) criação de tarefa exige design doc aprovado em `docs/plans/YYYY-MM-DD-*-design.md` referenciado na tarefa; (3) `git commit/push` do reviewer exige `gitnexus_detect_changes` registrado + aprovação humana via `question` (commit/push + "sim"); (4) invariante de entrada única violada bloqueia TODA delegação até correção manual do state.json. Formato de checkpoint `[ORCH][Fase X]` inalterado.
 
 Antes e depois de cada chamada `task_tool_set`, publique um checkpoint curto no chat principal usando este formato:
 

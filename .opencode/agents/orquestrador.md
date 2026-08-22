@@ -39,7 +39,7 @@ Agente **primary** (default). Coordena o pipeline 5 fases. **NUNCA implementa/ed
 
 ## Pipeline 5 Fases (OBRIGATÓRIO)
 
-> **Registry mecânico**: estado da tarefa em `.opencode/pipeline/state.json`, validado pelo plugin a cada delegação — `@dev-frontend` sem tarefa ativa cria a entrada automaticamente; qualquer outro target sem tarefa ativa é bloqueado com `[PIPELINE-REGISTRY]`. Checkpoint `[ORCH][Fase X]` inalterado; nenhuma ação manual necessária.
+> **Registry mecânico (FASE 2)**: estado da tarefa em `.opencode/pipeline/state.json`, validado pelo plugin a cada transição — pré-condições mecânicas: (1) delegação só a `dev-frontend`/`code-reviewer`; (2) criar tarefa exige design doc aprovado em `docs/plans/YYYY-MM-DD-*-design.md` referenciado nos args; (3) commit/push do reviewer exige detect_changes registrado + aprovação humana (`question` commit/push + afirmativo); (4) >1 entradas ativas bloqueia tudo até correção manual. Checkpoint `[ORCH][Fase X]` inalterado; nenhuma ação manual necessária além de corrigir o state.json se a invariante violar.
 
 ### 1. PLANEJAMENTO
 

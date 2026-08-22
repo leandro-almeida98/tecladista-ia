@@ -73,11 +73,16 @@ import type { Plugin } from "@opencode-ai/plugin"
 // .ts explícita (compatível com node --experimental-strip-types e tsc com
 // allowImportingTsExtensions).
 import {
+  aprovar,
   createEntry,
   getActiveEntry,
   readRegistry,
+  registrarDetectChanges,
+  registrarGateResult,
   updateEntry,
   writeRegistry,
+  type DetectChangesReport,
+  type GateResult,
   type RegistryEntry,
   type RegistryFile,
 } from "../pipeline/registry.ts"
@@ -230,6 +235,12 @@ const OPTIONS = {
   registryEnabled: true,
   /** Caminho do state.json RELATIVO à raiz do projeto (directory). */
   statePath: ".opencode/pipeline/state.json",
+  /**
+   * FASE 2 — targets autorizados a receber delegação `task`. Qualquer outro
+   * target é bloqueado mecanicamente ANTES da validação do registry
+   * ("[PIPELINE-REGISTRY] ... não autorizado"). Readonly por design.
+   */
+  allowedTargets: ["dev-frontend", "code-reviewer"] as const,
 
   // -------- DOCKER COMPOSE (apos gate aprovado) --------
   /**
@@ -529,6 +540,95 @@ type GateLogger = (
   message: string,
 ) => Promise<void> | void
 
+// ============================================================================
+// 3c) TRANSIÇÕES MECANIZADAS (FASE 2 — harness verificável) ==================
+// ============================================================================
+
+/**
+ * Design doc obrigatório na criação de tarefa: caminho relativo sob
+ * docs/plans com data ISO no nome (convenção do projeto). A existência em
+ * disco é conferida pelo chamador (existsSync sobre join(rootDir, match)).
+ */
+const DESIGN_DOC_RE = /docs\/plans\/\d{4}-\d{2}-\d{2}-[a-z0-9\-]+-design\.md/
+
+/**
+ * Guarda de commit do code-reviewer: comando git com commit/push (sem passar
+ * por encadeamento &/; antes do verbo — evita falso positivo em `echo git &&
+ * ls`). `git add/status/diff` NÃO casam (exigem só entrada ativa).
+ */
+const GIT_COMMIT_PUSH_RE = /\bgit\b[^&;]*\b(commit|push)\b/
+
+/** Pergunta relacionada a commit/push (tool question). */
+const PERGUNTA_COMMIT_PUSH_RE = /commit|push/i
+
+/** Resposta/label afirmativo (tool question). */
+const RESPOSTA_AFIRMATIVA_RE = /\b(sim|s|commitar|commitar e push|só commitar|aprovar|approve)\b/i
+
+/**
+ * Extrai o caminho do design doc dos args da delegação `task`: procura
+ * DESIGN_DOC_RE na concatenação de description + prompt. Null se ausente.
+ */
+function extrairDesignDoc(args: unknown): string | null {
+  const a = (args ?? {}) as { description?: unknown; prompt?: unknown }
+  const texto = `${typeof a.description === "string" ? a.description : ""}\n${
+    typeof a.prompt === "string" ? a.prompt : ""
+  }`
+  return DESIGN_DOC_RE.exec(texto)?.[0] ?? null
+}
+
+/**
+ * Parse TOLERANTE do output da tool detect_changes: extrai riskLevel
+ * (LOW|MEDIUM|HIGH|CRITICAL|UNKNOWN) e changedCount quando reconhecidos.
+ * NUNCA lança — saída não parseável ainda gera {ts} válido (registro mínimo).
+ */
+function parseDetectChangesReport(raw: unknown): DetectChangesReport {
+  const report: DetectChangesReport = { ts: new Date().toISOString() }
+  try {
+    const texto =
+      typeof raw === "string" ? raw : raw == null ? "" : JSON.stringify(raw)
+    if (texto !== "") {
+      const risk = /\brisk(?:[_ ]?level)?\D{0,15}?\b(low|medium|high|critical|unknown)\b/i.exec(
+        texto,
+      )
+      const riskLevel = risk?.[1]
+      if (riskLevel) report.riskLevel = riskLevel.toUpperCase()
+      const changed =
+        /\b(?:changed(?:[_ ]?count)?|symbols?|s[íi]mbolos?)\D{0,15}?(\d+)\b/i.exec(texto) ??
+        /\b(\d+)\s+(?:changed|impacted|symbols?)\b/i.exec(texto)
+      const changedRaw = changed?.[1]
+      if (changedRaw) {
+        const n = Number(changedRaw)
+        if (Number.isFinite(n)) report.changedCount = n
+      }
+    }
+  } catch {
+    // tolerante: JSON circular etc. — mantém {ts}
+  }
+  return report
+}
+
+/**
+ * Decide se a tool `question` aprova mecanicamente o pipeline: ALGUM texto de
+ * pergunta casa /commit|push/i E alguma resposta/label selecionado (output ou
+ * metadata) casa afirmativo. Parse tolerante — NUNCA lança (args circulares,
+ * shapes inesperados => false).
+ */
+function questionAprovaPipeline(args: unknown, output: unknown): boolean {
+  try {
+    const perguntas = JSON.stringify(
+      (args as { questions?: unknown } | null | undefined)?.questions ?? args ?? "",
+    )
+    const o = output as { output?: unknown; metadata?: unknown } | null | undefined
+    const resposta = [
+      typeof o?.output === "string" ? o.output : "",
+      JSON.stringify(o?.metadata ?? {}),
+    ].join("\n")
+    return PERGUNTA_COMMIT_PUSH_RE.test(perguntas) && RESPOSTA_AFIRMATIVA_RE.test(resposta)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Roda todos os steps de um gate; joga erro se qualquer um falhar.
  *
@@ -537,8 +637,18 @@ type GateLogger = (
  *  2. Compose pos-gate: sem `docker-compose.yml` na raiz => info "[SKIP]" e
  *     segue (compose pulado).
  *  3. Detector impeccable: script ausente => warn "[SKIP]" e segue.
+ *
+ * FASE 2: `onStepResult` (opcional) recebe um GateResult POR STEP executado
+ * (ok ou falha) — o plugin usa para gravar entry.gateResults no registry.
+ * O comportamento de throw é preservado: o collector NUNCA influencia a
+ * decisão do gate.
  */
-function runGate(gate: QualityGate, cwd: string, log: GateLogger): void {
+function runGate(
+  gate: QualityGate,
+  cwd: string,
+  log: GateLogger,
+  onStepResult?: (result: GateResult) => void,
+): void {
   // ---------------------------------------------------------------
   // GUARDA DE BOOTSTRAP: projeto pre-scaffold (sem package.json) —
   // nao ha build/teste/cobertura para rodar. Pulamos o gate SEM throw
@@ -556,6 +666,25 @@ function runGate(gate: QualityGate, cwd: string, log: GateLogger): void {
 
   for (const step of gate.commands) {
     const res = execGateStep(step, cwd)
+
+    // FASE 2: GateResult por step (ok E falha). detalhe = extrato curto da
+    // falha (targets de cobertura ou linhas de erro) ou null no sucesso.
+    const detalhe = res.ok
+      ? null
+      : truncate(
+        step.coverageKey
+          ? extractFailedCoverageTargets(res.output).join("; ")
+          : extractFailures(res.output, gate.failurePatterns, gate.maxFailureLines ?? 40),
+        300,
+      ) || null
+    onStepResult?.({
+      step: step.label,
+      ok: res.ok,
+      exitCode: res.ok ? 0 : res.status,
+      ts: new Date().toISOString(),
+      detalhe,
+    })
+
     if (res.ok) {
       summary.push(`[OK] ${step.label}`)
       continue
@@ -721,64 +850,125 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
      * o ultimo agente dev que terminou com sucesso (fonte do proximo gate).
      */
     "tool.execute.after": async (input, output) => {
-      if (input.tool !== "task") return
+      // ---------------------------------------------------------------
+      // (A) Task de delegação concluída: rastreia sessão/agente e marca a
+      //     fase correspondente no registry.
+      // ---------------------------------------------------------------
+      if (input.tool === "task") {
+        const subagentType = String((input.args as { subagent_type?: unknown })?.subagent_type ?? "")
+        const sessionId = String((output.metadata as { sessionId?: unknown })?.sessionId ?? "")
+        if (!subagentType || !sessionId) return
 
-      const subagentType = String((input.args as { subagent_type?: unknown })?.subagent_type ?? "")
-      const sessionId = String((output.metadata as { sessionId?: unknown })?.sessionId ?? "")
-      if (!subagentType || !sessionId) return
+        subagentAgentBySession.set(sessionId, subagentType)
 
-      subagentAgentBySession.set(sessionId, subagentType)
+        const finishedOk = /state="completed"/.test(String(output.output ?? ""))
+        const isGateSource = QUALITY_GATES.some((g) => g.sourceAgents.includes(subagentType))
+        if (finishedOk && isGateSource) {
+          lastCompletedGateSource = subagentType
+          await log("info", `Task concluida: ${subagentType} — gate sera acionado na transicao`)
+        }
 
-      const finishedOk = /state="completed"/.test(String(output.output ?? ""))
-      const isGateSource = QUALITY_GATES.some((g) => g.sourceAgents.includes(subagentType))
-      if (finishedOk && isGateSource) {
-        lastCompletedGateSource = subagentType
-        await log("info", `Task concluida: ${subagentType} — gate sera acionado na transicao`)
+        // -------------------------------------------------------------
+        // REGISTRY (FASE 1): task do agente terminou COM SUCESSO => marca a
+        // fase correspondente como concluida (concluidoEm = agora). Falha de
+        // registry NUNCA quebra o fluxo existente: apenas warn.
+        // -------------------------------------------------------------
+        if (OPTIONS.registryEnabled && finishedOk) {
+          const faseNome = AGENTE_PARA_FASE[subagentType]
+          if (faseNome) {
+            try {
+              const sp = join(rootDir, OPTIONS.statePath)
+              const arquivo = readRegistry(sp)
+              const ativa = getActiveEntry(arquivo)
+              if (ativa) {
+                const agora = new Date().toISOString()
+                // Fase já existe => marca concluida; não existe (ex.: "revisao",
+                // que não está nas fases iniciais do createEntry) => anexa como
+                // concluída — o registry reflete a execução real.
+                const existe = ativa.fases.some((f) => f.nome === faseNome)
+                const fases = existe
+                  ? ativa.fases.map((f) =>
+                    f.nome === faseNome && f.status !== "concluida"
+                      ? { ...f, status: "concluida" as const, concluidoEm: agora }
+                      : f,
+                  )
+                  : [
+                    ...ativa.fases,
+                    {
+                      nome: faseNome,
+                      agente: subagentType,
+                      status: "concluida" as const,
+                      iniciadoEm: agora,
+                      concluidoEm: agora,
+                    },
+                  ]
+                writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
+                await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
+              }
+            } catch (err) {
+              await log(
+                "warn",
+                `[REGISTRY] falha ao marcar fase "${faseNome}" concluida: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
+          }
+        }
+        return
       }
 
       // ---------------------------------------------------------------
-      // REGISTRY (FASE 1): task do agente terminou COM SUCESSO => marca a
-      // fase correspondente como concluida (concluidoEm = agora). Falha de
-      // registry NUNCA quebra o fluxo existente: apenas warn.
+      // (B) FASE 2 — reviewer→final: tool cujo nome contém detect_changes
+      //     executada COM SUCESSO (sem campo error) e entrada ativa =>
+      //     grava entry.detectChangesReport (parse tolerante do output).
+      //     NUNCA lança: falha de parse/registry vira warn.
       // ---------------------------------------------------------------
-      if (OPTIONS.registryEnabled && finishedOk) {
-        const faseNome = AGENTE_PARA_FASE[subagentType]
-        if (faseNome) {
-          try {
+      if (
+        OPTIONS.registryEnabled &&
+        typeof input.tool === "string" &&
+        input.tool.includes("detect_changes")
+      ) {
+        try {
+          const erro = (output as { error?: unknown } | null | undefined)?.error
+          if (erro == null) {
             const sp = join(rootDir, OPTIONS.statePath)
-            const arquivo = readRegistry(sp)
-            const ativa = getActiveEntry(arquivo)
+            const ativa = getActiveEntry(readRegistry(sp))
             if (ativa) {
-              const agora = new Date().toISOString()
-              // Fase já existe => marca concluida; não existe (ex.: "revisao",
-              // que não está nas fases iniciais do createEntry) => anexa como
-              // concluída — o registry reflete a execução real.
-              const existe = ativa.fases.some((f) => f.nome === faseNome)
-              const fases = existe
-                ? ativa.fases.map((f) =>
-                  f.nome === faseNome && f.status !== "concluida"
-                    ? { ...f, status: "concluida" as const, concluidoEm: agora }
-                    : f,
-                )
-                : [
-                  ...ativa.fases,
-                  {
-                    nome: faseNome,
-                    agente: subagentType,
-                    status: "concluida" as const,
-                    iniciadoEm: agora,
-                    concluidoEm: agora,
-                  },
-                ]
-              writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
-              await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
+              const report = parseDetectChangesReport(
+                (output as { output?: unknown } | null | undefined)?.output,
+              )
+              registrarDetectChanges(sp, ativa.taskId, report)
+              await log("info", `[REGISTRY] detect_changes registrado (${ativa.taskId})`)
             }
-          } catch (err) {
-            await log(
-              "warn",
-              `[REGISTRY] falha ao marcar fase "${faseNome}" concluida: ${err instanceof Error ? err.message : String(err)}`,
-            )
           }
+        } catch (err) {
+          await log(
+            "warn",
+            `[REGISTRY] falha ao registrar detect_changes: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+        return
+      }
+
+      // ---------------------------------------------------------------
+      // (C) FASE 2 — aprovação humana MECÂNICA: tool `question` com
+      //     pergunta de commit/push respondida afirmativamente => registra
+      //     aprovacaoHumana {por:"usuario"}. Parse tolerante, nunca throw.
+      // ---------------------------------------------------------------
+      if (OPTIONS.registryEnabled && input.tool === "question") {
+        try {
+          if (questionAprovaPipeline(input.args, output)) {
+            const sp = join(rootDir, OPTIONS.statePath)
+            const ativa = getActiveEntry(readRegistry(sp))
+            if (ativa) {
+              aprovar(sp, ativa.taskId, "usuario")
+              await log("info", `[REGISTRY] aprovação humana registrada (${ativa.taskId})`)
+            }
+          }
+        } catch (err) {
+          await log(
+            "warn",
+            `[REGISTRY] falha ao registrar aprovação humana: ${err instanceof Error ? err.message : String(err)}`,
+          )
         }
       }
     },
@@ -797,31 +987,52 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
         const target = String((output.args as { subagent_type?: unknown })?.subagent_type ?? "")
 
         // -------------------------------------------------------------
-        // (A0) REGISTRY DO PIPELINE (FASE 1): validação MECÂNICA da
-        //     pré-condição de delegação. Roda ANTES do gate: bloqueia
-        //     delegações sem tarefa ativa e cria a entrada ao delegar ao
-        //     dev-frontend. state.json ausente/corrompido == nenhuma ativa
-        //     (corrompido é sobrescrito com warn — estado inválido não é
-        //     recuperável aqui; histórico de tarefas concluídas se perde,
-        //     o pipeline segue).
+        // (A0-a) FASE 2 — ALLOWED TARGETS: bloqueia delegação a qualquer
+        //     agente fora da lista ANTES de tocar no registry.
+        // -------------------------------------------------------------
+        if (target !== "" && !(OPTIONS.allowedTargets as readonly string[]).includes(target)) {
+          throw new Error(
+            `[PIPELINE-REGISTRY] Delegação bloqueada: target '${target}' não autorizado. ` +
+            `Autorizados: ${OPTIONS.allowedTargets.join(", ")}.`,
+          )
+        }
+
+        // -------------------------------------------------------------
+        // (A0-b/c) REGISTRY DO PIPELINE: validação MECÂNICA da pré-condição
+        //     de delegação. Roda ANTES do gate.
+        //     FASE 2 (dívida W2): a leitura do arquivo tolera state.json
+        //     ausente/corrompido (warn + segue como "nenhuma ativa"), mas a
+        //     INVARIANTE violada (>1 entradas ativas, detectada por
+        //     getActiveEntry) PROPAGA e bloqueia TODA delegação — inclusive
+        //     ao dev-frontend — até o state.json ser corrigido manualmente.
+        //     Nunca contornamos corrupção lógica com append.
         // -------------------------------------------------------------
         if (OPTIONS.registryEnabled && target !== "") {
           const sp = join(rootDir, OPTIONS.statePath)
           let arquivo: RegistryFile | null = null
-          let ativa: RegistryEntry | null = null
           try {
             arquivo = readRegistry(sp)
-            ativa = getActiveEntry(arquivo)
           } catch (err) {
             await log(
               "warn",
               `[REGISTRY] state.json ausente/inválido (${sp}): ${err instanceof Error ? err.message : String(err)}`,
             )
           }
+          // FORA do try: invariante violada NUNCA é silenciada.
+          const ativa = getActiveEntry(arquivo ?? { versao: 1, tarefas: [] })
 
           if (target === "dev-frontend") {
             if (!ativa) {
-              const entry = createEntry({ feature: extrairFeature(output.args) })
+              // FASE 2 — planejamento→dev: criação exige design doc
+              // referenciado nos args E existente em disco.
+              const designDoc = extrairDesignDoc(output.args)
+              if (!designDoc || !existsSync(join(rootDir, designDoc))) {
+                throw new Error(
+                  `[PIPELINE-REGISTRY] planejamento→dev bloqueado: pré-condição ausente — ` +
+                  `design doc aprovado em docs/plans/YYYY-MM-DD-*-design.md referenciado na tarefa.`,
+                )
+              }
+              const entry = createEntry({ feature: extrairFeature(output.args), designDoc })
               writeRegistry(sp, { versao: 1, tarefas: [...(arquivo?.tarefas ?? []), entry] })
               await log("info", `[REGISTRY] tarefa criada: ${entry.taskId} — "${entry.feature}"`)
             }
@@ -846,7 +1057,21 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
         if (gate) {
           await log("info", `Transicao para ${OPTIONS.targetAgent}: rodando ${gate.label}`)
           try {
-            runGate(gate, rootDir, log)
+            runGate(gate, rootDir, log, (result) => {
+              // FASE 2: cada step vira GateResult em entry.gateResults (ok E
+              // falha). Falha de registry NUNCA quebra o gate: apenas warn.
+              try {
+                const sp = join(rootDir, OPTIONS.statePath)
+                const arquivo = readRegistry(sp)
+                const ativa = getActiveEntry(arquivo)
+                if (ativa) registrarGateResult(sp, ativa.taskId, result)
+              } catch (err) {
+                void log(
+                  "warn",
+                  `[REGISTRY] falha ao registrar gate result "${result.step}": ${err instanceof Error ? err.message : String(err)}`,
+                )
+              }
+            })
           } finally {
             lastCompletedGateSource = null // nao repetir o mesmo gate sem nova task dev
           }
@@ -872,7 +1097,61 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
       }
 
       // ---------------------------------------------------------------
-      // (C) BLOQUEIO DE PUSH DESATIVADO: code-reviewer commita e faz push
+      // (D) FASE 2 — GUARDA DE COMMIT DO REVIEWER: `git commit/push` do
+      //     code-reviewer exige entrada ativa com detectChangesReport E
+      //     aprovacaoHumana (throw nomeando a pré-condição que falta).
+      //     Outros comandos git (add/status/diff...) exigem só entrada
+      //     ativa. Comandos não-git e outros agentes: intocados.
+      //     Invariante violada (>1 ativas) propaga (getActiveEntry lança).
+      // ---------------------------------------------------------------
+      if (input.tool === "bash" && OPTIONS.registryEnabled) {
+        const command = String((output.args as { command?: unknown })?.command ?? "")
+        const agent = await currentAgent(input.sessionID)
+        if (agent === OPTIONS.targetAgent && command.trim() !== "") {
+          const sp = join(rootDir, OPTIONS.statePath)
+          let arquivo: RegistryFile | null = null
+          try {
+            arquivo = readRegistry(sp)
+          } catch (err) {
+            await log(
+              "warn",
+              `[REGISTRY] state.json ausente/inválido (${sp}): ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+          // FORA do try: invariante violada bloqueia (mesma filosofia do task).
+          const ativa = getActiveEntry(arquivo ?? { versao: 1, tarefas: [] })
+
+          if (GIT_COMMIT_PUSH_RE.test(command)) {
+            if (!ativa) {
+              throw new Error(
+                `[PIPELINE-REGISTRY] git commit/push bloqueado: nenhuma tarefa ativa no registry ` +
+                `(${OPTIONS.statePath}).`,
+              )
+            }
+            if (!ativa.detectChangesReport) {
+              throw new Error(
+                `[PIPELINE-REGISTRY] git commit/push bloqueado: relatório gitnexus_detect_changes não registrado ` +
+                `para a tarefa ativa (${ativa.taskId}). Pré-condição: execute gitnexus_detect_changes antes de commitar.`,
+              )
+            }
+            if (!ativa.aprovacaoHumana) {
+              throw new Error(
+                `[PIPELINE-REGISTRY] git commit/push bloqueado: aprovação humana não registrada ` +
+                `para a tarefa ativa (${ativa.taskId}). Pré-condição: aprove explicitamente via question (commit/push + resposta afirmativa).`,
+              )
+            }
+          } else if (/\bgit\b/.test(command) && !ativa) {
+            // git add/status/diff etc.: exige somente entrada ativa.
+            throw new Error(
+              `[PIPELINE-REGISTRY] Delegação bloqueada: nenhuma tarefa ativa no registry ` +
+              `(${OPTIONS.statePath}). Pré-condição: inicie uma tarefa delegando ao dev-frontend.`,
+            )
+          }
+        }
+      }
+
+      // ---------------------------------------------------------------
+      // (E) BLOQUEIO DE PUSH DESATIVADO: code-reviewer commita e faz push
       //     p/ main após aprovação. Mantido atrás do flag (false) para
       //     reativação fácil.
       // ---------------------------------------------------------------
@@ -919,6 +1198,12 @@ export const __internals: {
   extrairFeature: typeof extrairFeature
   MAX_COVERAGE_TARGETS: number
   DETECTOR_FAILURE_PATTERNS: RegExp[]
+  // transições mecanizadas (FASE 2)
+  extrairDesignDoc: typeof extrairDesignDoc
+  parseDetectChangesReport: typeof parseDetectChangesReport
+  questionAprovaPipeline: typeof questionAprovaPipeline
+  DESIGN_DOC_RE: RegExp
+  GIT_COMMIT_PUSH_RE: RegExp
   // constantes de configuração (readonly no nível de tipo)
   readonly QUALITY_GATES: QualityGate[]
   readonly COVERAGE_THRESHOLDS: Record<string, number>
@@ -941,6 +1226,11 @@ export const __internals: {
   extrairFeature,
   MAX_COVERAGE_TARGETS,
   DETECTOR_FAILURE_PATTERNS,
+  extrairDesignDoc,
+  parseDetectChangesReport,
+  questionAprovaPipeline,
+  DESIGN_DOC_RE,
+  GIT_COMMIT_PUSH_RE,
   QUALITY_GATES,
   COVERAGE_THRESHOLDS,
   OPTIONS,

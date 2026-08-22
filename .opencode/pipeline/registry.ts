@@ -63,14 +63,29 @@ export interface AprovacaoHumana {
   em: string
 }
 
+/**
+ * Relatório tolerante do `gitnexus_detect_changes` (FASE 2 — revisão):
+ * `ts` obrigatório; `riskLevel`/`changedCount` opcionais (extração do output
+ * pode falhar sem invalidar o registro).
+ */
+export interface DetectChangesReport {
+  ts: string
+  riskLevel?: string
+  changedCount?: number
+}
+
 /** Uma tarefa do pipeline (uma feature). */
 export interface RegistryEntry {
   taskId: string
   feature: string
+  /** Design doc aprovado que originou a tarefa (FASE 2); null p/ legado. */
+  designDoc: string | null
   fases: PipelineFase[]
   gateResults: GateResult[]
   retries: number
   aprovacaoHumana: AprovacaoHumana | null
+  /** Relatório detect_changes registrado na revisão (FASE 2); null até lá. */
+  detectChangesReport: DetectChangesReport | null
 }
 
 /** Formato do state.json em disco. */
@@ -149,9 +164,36 @@ export function validateEntry(entry: unknown): void {
   if (!Array.isArray(e.gateResults)) {
     throw new Error('[PIPELINE-REGISTRY] Campo inválido: "gateResults" deve ser array.')
   }
+  for (const gate of e.gateResults) {
+    if (gate == null || typeof gate !== "object") {
+      throw new Error('[PIPELINE-REGISTRY] Campo inválido: cada item de "gateResults" deve ser um objeto.')
+    }
+    const g = gate as Record<string, unknown>
+    assertNonEmptyString(g.step, "gateResults[].step")
+    if (typeof g.ok !== "boolean") {
+      throw new Error('[PIPELINE-REGISTRY] Campo inválido: "gateResults[].ok" deve ser boolean.')
+    }
+    if (g.exitCode !== null && (typeof g.exitCode !== "number" || !Number.isInteger(g.exitCode))) {
+      throw new Error(
+        '[PIPELINE-REGISTRY] Campo inválido: "gateResults[].exitCode" deve ser inteiro ou null.',
+      )
+    }
+    assertNonEmptyString(g.ts, "gateResults[].ts")
+    if (g.detalhe !== null && typeof g.detalhe !== "string") {
+      throw new Error(
+        '[PIPELINE-REGISTRY] Campo inválido: "gateResults[].detalhe" deve ser string ou null.',
+      )
+    }
+  }
 
   if (typeof e.retries !== "number" || !Number.isInteger(e.retries) || e.retries < 0) {
     throw new Error('[PIPELINE-REGISTRY] Campo inválido: "retries" deve ser inteiro >= 0.')
+  }
+
+  // FASE 2: designDoc — string não vazia ou null. `undefined` tolerado por
+  // compatibilidade com entradas da FASE 1 já persistidas em disco.
+  if (e.designDoc !== undefined && e.designDoc !== null) {
+    assertNonEmptyString(e.designDoc, "designDoc")
   }
 
   if (e.aprovacaoHumana !== null) {
@@ -163,6 +205,31 @@ export function validateEntry(entry: unknown): void {
     const a = e.aprovacaoHumana as Record<string, unknown>
     assertNonEmptyString(a.por, "aprovacaoHumana.por")
     assertNonEmptyString(a.em, "aprovacaoHumana.em")
+  }
+
+  // FASE 2: detectChangesReport — null/undefined (legado) ou {ts, riskLevel?,
+  // changedCount?}. Campos opcionais validados SOMENTE quando presentes.
+  if (e.detectChangesReport !== undefined && e.detectChangesReport !== null) {
+    if (typeof e.detectChangesReport !== "object") {
+      throw new Error(
+        '[PIPELINE-REGISTRY] Campo inválido: "detectChangesReport" deve ser null ou {ts, riskLevel?, changedCount?}.',
+      )
+    }
+    const d = e.detectChangesReport as Record<string, unknown>
+    assertNonEmptyString(d.ts, "detectChangesReport.ts")
+    if (d.riskLevel !== undefined && typeof d.riskLevel !== "string") {
+      throw new Error(
+        '[PIPELINE-REGISTRY] Campo inválido: "detectChangesReport.riskLevel" deve ser string.',
+      )
+    }
+    if (
+      d.changedCount !== undefined &&
+      (typeof d.changedCount !== "number" || !Number.isInteger(d.changedCount) || d.changedCount < 0)
+    ) {
+      throw new Error(
+        '[PIPELINE-REGISTRY] Campo inválido: "detectChangesReport.changedCount" deve ser inteiro >= 0.',
+      )
+    }
   }
 }
 
@@ -244,15 +311,21 @@ function slugify(text: string): string {
  * Cria uma nova entrada de tarefa:
  *   - taskId = `<slug-da-feature>-<timestamp base36>-<8 hex>` (único);
  *   - fases iniciais: planejamento/concluida + desenvolvimento/em_andamento;
- *   - gateResults [], retries 0, aprovacaoHumana null.
+ *   - gateResults [], retries 0, aprovacaoHumana null;
+ *   - designDoc informado (FASE 2) ou null; detectChangesReport null.
  * `now` injetável para testes determinísticos.
  */
-export function createEntry(input: { feature: string; now?: Date }): RegistryEntry {
+export function createEntry(input: {
+  feature: string
+  designDoc?: string
+  now?: Date
+}): RegistryEntry {
   const nowIso = (input.now ?? new Date()).toISOString()
   const taskId = `${slugify(input.feature)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   return {
     taskId,
     feature: input.feature,
+    designDoc: input.designDoc ?? null,
     fases: [
       {
         nome: "planejamento",
@@ -272,6 +345,7 @@ export function createEntry(input: { feature: string; now?: Date }): RegistryEnt
     gateResults: [],
     retries: 0,
     aprovacaoHumana: null,
+    detectChangesReport: null,
   }
 }
 
@@ -310,4 +384,55 @@ export function updateEntry(
     i === index ? { ...t, ...patch } : t,
   )
   return { ...registryFile, tarefas }
+}
+
+// ============================================================================
+// HELPERS DE TRANSIÇÃO (FASE 2 — todos persistem via writeRegistry)
+// ============================================================================
+
+/**
+ * Anexa um GateResult à entrada `taskId` e persiste. A validação de shape
+ * acontece no writeRegistry (antes de qualquer escrita em disco): resultado
+ * inválido lança e mantém o arquivo original intacto.
+ */
+export function registrarGateResult(
+  statePath: string,
+  taskId: string,
+  result: GateResult,
+): void {
+  const arquivo = readRegistry(statePath)
+  const entry = arquivo.tarefas.find((t) => t.taskId === taskId)
+  if (!entry) {
+    throw new Error(`[PIPELINE-REGISTRY] taskId não encontrado no registry: ${taskId}`)
+  }
+  writeRegistry(
+    statePath,
+    updateEntry(arquivo, taskId, { gateResults: [...entry.gateResults, result] }),
+  )
+}
+
+/**
+ * Grava (ou sobrescreve — última escrita vence) o relatório detect_changes da
+ * entrada `taskId` e persiste.
+ */
+export function registrarDetectChanges(
+  statePath: string,
+  taskId: string,
+  report: DetectChangesReport,
+): void {
+  const arquivo = readRegistry(statePath)
+  writeRegistry(statePath, updateEntry(arquivo, taskId, { detectChangesReport: report }))
+}
+
+/**
+ * Registra aprovação humana explícita (`{por, em: agora}`) na entrada `taskId`
+ * e persiste. Usado pelo after-hook da tool `question` (por: "usuario") ou por
+ * registro manual do orquestrador.
+ */
+export function aprovar(statePath: string, taskId: string, por: string): void {
+  const arquivo = readRegistry(statePath)
+  writeRegistry(
+    statePath,
+    updateEntry(arquivo, taskId, { aprovacaoHumana: { por, em: new Date().toISOString() } }),
+  )
 }

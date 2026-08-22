@@ -8,7 +8,7 @@
  * então a guarda de bootstrap pula o gate com warn (comportamento existente).
  */
 import { afterEach, beforeEach, describe, expect, test } from "vitest"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -82,6 +82,14 @@ function lerTarefas(): RegistryEntry[] {
   return readRegistry(statePath()).tarefas
 }
 
+/** Cria um design doc real no tmp e retorna o caminho relativo (FASE 2). */
+function criarDesignDoc(nome = "2026-08-21-tela-login-design.md"): string {
+  const dir = join(tmpDir, "docs", "plans")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, nome), "# Design\n", "utf-8")
+  return `docs/plans/${nome}`
+}
+
 describe("__internals", () => {
   test("deveExportarFuncoesDoRegistry_paraTestes", () => {
     expect(typeof __internals.readRegistry).toBe("function")
@@ -116,40 +124,51 @@ describe("tool.execute.before — task com registry habilitado", () => {
   })
 
   test("deveCriarEntradaAutomatica_quandoDelegaDevFrontendSemEntrada", async () => {
+    const designDoc = criarDesignDoc()
     const hooks = await makeHooks()
-    await callBefore(hooks, { subagent_type: "dev-frontend", description: "Tela de login" })
+    await callBefore(hooks, {
+      subagent_type: "dev-frontend",
+      description: `Tela de login — design em ${designDoc}`,
+    })
 
     const tarefas = lerTarefas()
     expect(tarefas).toHaveLength(1)
     const unica = tarefas[0] as RegistryEntry
-    expect(unica.feature).toBe("Tela de login")
+    expect(unica.feature).toBe(`Tela de login — design em ${designDoc}`)
+    expect(unica.designDoc).toBe(designDoc)
     const desenvolvimento = unica.fases.find((f) => f.nome === "desenvolvimento")
     expect(desenvolvimento?.status).toBe("em_andamento")
     expect(desenvolvimento?.agente).toBe("dev-frontend")
   })
 
   test("deveReusarEntradaAtiva_quandoSegundaDelegacaoAoDevFrontend_naoCriaSegunda", async () => {
+    const designDoc = criarDesignDoc("2026-08-21-primeira-design.md")
     const hooks = await makeHooks()
-    await callBefore(hooks, { subagent_type: "dev-frontend", description: "Primeira" })
+    await callBefore(hooks, {
+      subagent_type: "dev-frontend",
+      description: `Primeira — ${designDoc}`,
+    })
     await callBefore(hooks, { subagent_type: "dev-frontend", description: "Segunda" })
 
     const tarefas = lerTarefas()
     expect(tarefas).toHaveLength(1)
-    expect((tarefas[0] as RegistryEntry).feature).toBe("Primeira")
+    expect((tarefas[0] as RegistryEntry).feature).toContain("Primeira")
   })
 
   test("deveExtrairFeatureDaPrimeiraLinhaDoPrompt_quandoDescriptionAusente_truncada80", async () => {
+    const designDoc = criarDesignDoc("2026-08-21-menu-design.md")
     const hooks = await makeHooks()
     const linha = "Refatorar o menu lateral para suportar temas escuros e claros com persistência"
     await callBefore(hooks, {
       subagent_type: "dev-frontend",
-      prompt: `${linha}\nDetalhes adicionais que nao devem entrar`,
+      prompt: `${linha}\nDetalhes adicionais que nao devem entrar\ndesign doc: ${designDoc}`,
     })
 
     const unica = lerTarefas()[0] as RegistryEntry
     expect(unica.feature.startsWith(linha.slice(0, 10))).toBe(true)
     expect(unica.feature.length).toBeLessThanOrEqual(80)
     expect(unica.feature).not.toContain("Detalhes adicionais")
+    expect(unica.designDoc).toBe(designDoc)
   })
 })
 
