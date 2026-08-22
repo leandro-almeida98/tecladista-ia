@@ -39,6 +39,8 @@ Agente **primary** (default). Coordena o pipeline 5 fases. **NUNCA implementa/ed
 
 ## Pipeline 5 Fases (OBRIGATÓRIO)
 
+> **Registry mecânico**: estado da tarefa em `.opencode/pipeline/state.json`, validado pelo plugin a cada delegação — `@dev-frontend` sem tarefa ativa cria a entrada automaticamente; qualquer outro target sem tarefa ativa é bloqueado com `[PIPELINE-REGISTRY]`. Checkpoint `[ORCH][Fase X]` inalterado; nenhuma ação manual necessária.
+
 ### 1. PLANEJAMENTO
 
 - **OBRIGATÓRIO — skill `brainstorming` antes de qualquer tarefa criativa** (nova funcionalidade, componente, página ou mudança de comportamento): carregar a skill `brainstorming` via ferramenta `skill` e seguir o processo dela — explorar o contexto do projeto, fazer perguntas UMA por vez, propor 2-3 abordagens com trade-offs e recomendação, apresentar o design (arquitetura, componentes, fluxo de dados, erros, testes) e obter aprovação do usuário antes de delegar implementação.
