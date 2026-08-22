@@ -16,3 +16,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.log
+# pipeline (runtime artifacts — FASE 1 harness verificável)
+.opencode/pipeline/state.json
+.opencode/pipeline/metrics.jsonl

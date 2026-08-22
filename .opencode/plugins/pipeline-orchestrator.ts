@@ -69,6 +69,18 @@ import { execFileSync, execSync, type ExecSyncOptions } from "node:child_process
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
+// Registry do pipeline (FASE 1 — harness verificável). Import com extensão
+// .ts explícita (compatível com node --experimental-strip-types e tsc com
+// allowImportingTsExtensions).
+import {
+  createEntry,
+  getActiveEntry,
+  readRegistry,
+  updateEntry,
+  writeRegistry,
+  type RegistryEntry,
+  type RegistryFile,
+} from "../pipeline/registry.ts"
 
 // ============================================================================
 // 1) CONFIGURACAO DO QUALITY GATE —  EDITE AQUI OS COMANDOS EXATOS  ==========
@@ -202,6 +214,23 @@ const OPTIONS = {
   /** Se o agente fonte for desconhecido, roda o gate do frontend (default false = nao bloqueia). */
   gateOnUnknownSource: false,
 
+  // -------- REGISTRY DO PIPELINE (FASE 1 — harness verificável) --------
+  /**
+   * Validação MECÂNICA da pré-condição de delegação via registry persistido
+   * (`.opencode/pipeline/state.json`):
+   *   - delegação ao dev-frontend SEM entrada ativa => cria a entrada
+   *     (feature extraída de args.description ?? 1ª linha de args.prompt,
+   *     máx. 80 chars) e marca a fase "desenvolvimento" em_andamento;
+   *   - delegação ao dev-frontend COM entrada ativa => reutiliza (nunca cria
+   *     segunda — invariante de entrada única);
+   *   - delegação a qualquer outro agente SEM entrada ativa => throw
+   *     "[PIPELINE-REGISTRY] ..." (bloqueia antes do gate);
+   *   - COM entrada ativa => fluxo normal (gates abaixo intocados).
+   */
+  registryEnabled: true,
+  /** Caminho do state.json RELATIVO à raiz do projeto (directory). */
+  statePath: ".opencode/pipeline/state.json",
+
   // -------- DOCKER COMPOSE (apos gate aprovado) --------
   /**
    * Sobe o docker compose com rebuild quando o gate passa (atualiza as imagens
@@ -242,10 +271,13 @@ const OPTIONS = {
 // 3) IMPLEMENTACAO
 // ============================================================================
 
-const isWindows = process.platform === "win32"
-
-/** Adapta o comando ao SO (WSL no Windows, shell normal no Linux). */
+/**
+ * Adapta o comando ao SO (WSL no Windows, shell normal no Linux).
+ * A checagem de plataforma é feita NA CHAMADA (não capturada no load do
+ * módulo) para que testes possam simular win32 via mock de process.platform.
+ */
 function resolveCommand(command: string): string {
+  const isWindows = process.platform === "win32"
   if (isWindows && OPTIONS.onWindowsUseWsl && OPTIONS.wslPrefix) {
     return `${OPTIONS.wslPrefix} bash -lc "${command.replace(/"/g, '\\"')}"`
   }
@@ -394,13 +426,13 @@ function extractFailedCoverageTargets(output: string): string[] {
   let matched = false
   for (const m of output.matchAll(perFileLine)) {
     matched = true
-    add(m[1])
+    add(m[1] ?? "")
   }
   if (matched) return targets
 
   // Fallback: qualquer linha de threshold com "for <arquivo>" no fim.
   const fallback = /\bdoes not meet .*? threshold \([\d.]+%\) for (.+?)\s*$/gim
-  for (const m of output.matchAll(fallback)) add(m[1])
+  for (const m of output.matchAll(fallback)) add(m[1] ?? "")
   return targets
 }
 
@@ -453,6 +485,42 @@ function getChangedUiFiles(cwd: string, uiExtensions: readonly string[]): string
  */
 function hasPackageJson(cwd: string): boolean {
   return existsSync(join(cwd, "package.json"))
+}
+
+// ============================================================================
+// 3b) REGISTRY DO PIPELINE (FASE 1) — helpers de integração ==================
+// ============================================================================
+
+/**
+ * Mapeia agente delegado -> fase do registry marcada como concluída quando a
+ * task dele termina com sucesso (hook tool.execute.after).
+ */
+const AGENTE_PARA_FASE: Record<string, string> = {
+  "dev-frontend": "desenvolvimento",
+  "code-reviewer": "revisao",
+}
+
+/** Tamanho máximo da feature extraída dos args da delegação. */
+const MAX_FEATURE_LEN = 80
+
+/** Feature padrão quando a delegação não traz description/prompt utilizáveis. */
+const FEATURE_PADRAO = "tarefa sem descrição"
+
+/**
+ * Extrai a feature da task a partir dos args da delegação `task`:
+ * `args.description` se for string não vazia; senão a PRIMEIRA linha de
+ * `args.prompt`; senão FEATURE_PADRAO. Sempre trim + truncada em 80 chars.
+ */
+function extrairFeature(args: unknown): string {
+  const a = (args ?? {}) as { description?: unknown; prompt?: unknown }
+  const bruto =
+    typeof a.description === "string" && a.description.trim() !== ""
+      ? a.description
+      : typeof a.prompt === "string"
+        ? (a.prompt.split(/\r?\n/)[0] ?? "")
+        : ""
+  const limpo = bruto.trim().slice(0, MAX_FEATURE_LEN).trim()
+  return limpo === "" ? FEATURE_PADRAO : limpo
 }
 
 /** Logger aceito pelo runGate (eventos nao-fatais: skip/warn/info). */
@@ -667,6 +735,52 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
         lastCompletedGateSource = subagentType
         await log("info", `Task concluida: ${subagentType} — gate sera acionado na transicao`)
       }
+
+      // ---------------------------------------------------------------
+      // REGISTRY (FASE 1): task do agente terminou COM SUCESSO => marca a
+      // fase correspondente como concluida (concluidoEm = agora). Falha de
+      // registry NUNCA quebra o fluxo existente: apenas warn.
+      // ---------------------------------------------------------------
+      if (OPTIONS.registryEnabled && finishedOk) {
+        const faseNome = AGENTE_PARA_FASE[subagentType]
+        if (faseNome) {
+          try {
+            const sp = join(rootDir, OPTIONS.statePath)
+            const arquivo = readRegistry(sp)
+            const ativa = getActiveEntry(arquivo)
+            if (ativa) {
+              const agora = new Date().toISOString()
+              // Fase já existe => marca concluida; não existe (ex.: "revisao",
+              // que não está nas fases iniciais do createEntry) => anexa como
+              // concluída — o registry reflete a execução real.
+              const existe = ativa.fases.some((f) => f.nome === faseNome)
+              const fases = existe
+                ? ativa.fases.map((f) =>
+                  f.nome === faseNome && f.status !== "concluida"
+                    ? { ...f, status: "concluida" as const, concluidoEm: agora }
+                    : f,
+                )
+                : [
+                  ...ativa.fases,
+                  {
+                    nome: faseNome,
+                    agente: subagentType,
+                    status: "concluida" as const,
+                    iniciadoEm: agora,
+                    concluidoEm: agora,
+                  },
+                ]
+              writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
+              await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
+            }
+          } catch (err) {
+            await log(
+              "warn",
+              `[REGISTRY] falha ao marcar fase "${faseNome}" concluida: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        }
+      }
     },
 
     /**
@@ -681,6 +795,45 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
       // ---------------------------------------------------------------
       if (input.tool === "task") {
         const target = String((output.args as { subagent_type?: unknown })?.subagent_type ?? "")
+
+        // -------------------------------------------------------------
+        // (A0) REGISTRY DO PIPELINE (FASE 1): validação MECÂNICA da
+        //     pré-condição de delegação. Roda ANTES do gate: bloqueia
+        //     delegações sem tarefa ativa e cria a entrada ao delegar ao
+        //     dev-frontend. state.json ausente/corrompido == nenhuma ativa
+        //     (corrompido é sobrescrito com warn — estado inválido não é
+        //     recuperável aqui; histórico de tarefas concluídas se perde,
+        //     o pipeline segue).
+        // -------------------------------------------------------------
+        if (OPTIONS.registryEnabled && target !== "") {
+          const sp = join(rootDir, OPTIONS.statePath)
+          let arquivo: RegistryFile | null = null
+          let ativa: RegistryEntry | null = null
+          try {
+            arquivo = readRegistry(sp)
+            ativa = getActiveEntry(arquivo)
+          } catch (err) {
+            await log(
+              "warn",
+              `[REGISTRY] state.json ausente/inválido (${sp}): ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+
+          if (target === "dev-frontend") {
+            if (!ativa) {
+              const entry = createEntry({ feature: extrairFeature(output.args) })
+              writeRegistry(sp, { versao: 1, tarefas: [...(arquivo?.tarefas ?? []), entry] })
+              await log("info", `[REGISTRY] tarefa criada: ${entry.taskId} — "${entry.feature}"`)
+            }
+            // COM entrada ativa: reutiliza (nunca cria segunda).
+          } else if (!ativa) {
+            throw new Error(
+              `[PIPELINE-REGISTRY] Delegação bloqueada: nenhuma tarefa ativa no registry ` +
+              `(${OPTIONS.statePath}). Pré-condição: inicie uma tarefa delegando ao dev-frontend.`,
+            )
+          }
+        }
+
         if (target !== OPTIONS.targetAgent) return
 
         const source = lastCompletedGateSource
@@ -737,6 +890,60 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
       }
     },
   }
+}
+
+/**
+ * Superfície interna para TESTES unitários (não usar em produção):
+ * expõe helpers puros/semi-puros do gate, do registry e as constantes de
+ * configuração (somente leitura — tipos Readonly; sem freeze em runtime para
+ * permitir que testes alternem flags como detectorOnGatePass.blockOnFindings
+ * com restore em try/finally).
+ */
+export const __internals: {
+  // registry (FASE 1)
+  readRegistry: typeof readRegistry
+  writeRegistry: typeof writeRegistry
+  createEntry: typeof createEntry
+  getActiveEntry: typeof getActiveEntry
+  updateEntry: typeof updateEntry
+  // helpers do gate
+  resolveCommand: typeof resolveCommand
+  execGateStep: typeof execGateStep
+  execDetectorStep: typeof execDetectorStep
+  extractFailures: typeof extractFailures
+  truncate: typeof truncate
+  extractFailedCoverageTargets: typeof extractFailedCoverageTargets
+  getChangedUiFiles: typeof getChangedUiFiles
+  hasPackageJson: typeof hasPackageJson
+  runGate: typeof runGate
+  extrairFeature: typeof extrairFeature
+  MAX_COVERAGE_TARGETS: number
+  DETECTOR_FAILURE_PATTERNS: RegExp[]
+  // constantes de configuração (readonly no nível de tipo)
+  readonly QUALITY_GATES: QualityGate[]
+  readonly COVERAGE_THRESHOLDS: Record<string, number>
+  readonly OPTIONS: typeof OPTIONS
+} = {
+  readRegistry,
+  writeRegistry,
+  createEntry,
+  getActiveEntry,
+  updateEntry,
+  resolveCommand,
+  execGateStep,
+  execDetectorStep,
+  extractFailures,
+  truncate,
+  extractFailedCoverageTargets,
+  getChangedUiFiles,
+  hasPackageJson,
+  runGate,
+  extrairFeature,
+  MAX_COVERAGE_TARGETS,
+  DETECTOR_FAILURE_PATTERNS,
+  QUALITY_GATES,
+  COVERAGE_THRESHOLDS,
+  OPTIONS,
 }
 
 export default PipelineOrchestrator
