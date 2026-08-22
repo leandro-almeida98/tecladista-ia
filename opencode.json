@@ -21,7 +21,7 @@
   "mcp": {
     "gitnexus": {
       "type": "local",
-      "command": ["node", "/home/leandro/projetos/tecladista-ia/.gitnexus/run.cjs", "mcp"],
+      "command": ["node", ".gitnexus/run.cjs", "mcp"],
       "enabled": true,
       "environment": {
         "GITNEXUS_MCP_READ_ONLY": "1",

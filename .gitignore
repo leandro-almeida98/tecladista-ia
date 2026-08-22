@@ -1,0 +1,18 @@
+# deps
+node_modules/
+# build
+dist/
+dist-ssr/
+coverage/
+# caches
+__pycache__/
+*.pyc
+.vite/
+# env
+.env
+.env.*
+!.env.example
+# SO/IDE
+.DS_Store
+Thumbs.db
+*.log

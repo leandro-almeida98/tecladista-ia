@@ -374,7 +374,7 @@ Sinais de que o código precisa de refatoração antes do teste:
 - [ ] Sem `document.querySelector` / `fireEvent` onde `userEvent` existe / `toHaveClass` de Tailwind
 - [ ] Sem teste inútil (seção 4.1): nada de framework test, circular mock, snapshot puro
 - [ ] Fluxos de usuário reais onde aplicável (navegação, voltar, formulário, multi-step)
-- [ ] Cobertura medida — ≥50% por arquivo (gate mínimo), ≥95% meta ideal
+- [ ] Cobertura medida — ≥95% POR ARQUIVO (gate bloqueia abaixo)
 - [ ] Análise de mutação mental executada (3 cenários listados)
 - [ ] Código difícil de testar → refatoração sugerida/feita
 - [ ] Nenhum assert de classe CSS / `console.log` / snapshot como único assert
@@ -423,8 +423,8 @@ npm run test:e2e          # Cypress (E2E)
 
 ## 11. Qualidade e Cobertura
 
-- **Gate mínimo (CI):** ≥50% por arquivo modificado — abaixo disso, PR bloqueado.
-- **Meta ideal:** ≥95% global do frontend, priorizando código novo/alterado.
+- **Gate (CI):** ≥95% POR ARQUIVO — abaixo disso, a transição dev → code-reviewer é bloqueada.
+- **Meta:** ≥95% por arquivo em todo o frontend, priorizando código novo/alterado.
 - **Cobertura não é tudo:** 100% de cobertura com asserts fracos é pior que 80% com asserts fortes (ver seção 4).
 - **Priorize:** código novo/alterado deve ter cobertura proporcionalmente maior que código legado.
 - **Meça sempre** (`npm run test:coverage`) antes de declarar funcionalidade pronta; reporte o número ao orquestrador.
@@ -439,7 +439,7 @@ npm run test:e2e          # Cypress (E2E)
 3. **REFACTOR** — limpe código mantendo teste verde (extraia hook/service se o teste ficar difícil).
 4. **REPEAT** para próximo cenário (edge case, error flow — pirâmide da seção 1.2).
 5. **Mutação mental** — liste 3 formas em que o teste pode passar com bug (seção 5).
-6. **Cobertura** — meça com `npm run test:coverage`, garanta ≥50% por arquivo, meta ≥95%.
+6. **Cobertura** — meça com `npm run test:coverage`, garanta ≥95% POR ARQUIVO (gate bloqueia abaixo).
 
 ---
 

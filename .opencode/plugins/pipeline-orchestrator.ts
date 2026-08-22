@@ -40,6 +40,7 @@
  *     findings nao-advisory) com blockOnFindings:true => throw (bloqueia a
  *     transicao para o code-reviewer); com false => apenas warn. Sem
  *     arquivos UI alterados => log "[OK] detector: nenhum arquivo UI alterado".
+ *     Execucao SEM shell (execFileSync) — filenames vao como args vetoriais.
  *     Configuravel em OPTIONS.detectorOnGatePass — EDITE ALI.
  *
  * OBSERVACAO IMPORTANTE
@@ -50,6 +51,10 @@
  *    hook `tool.execute.after` da task anterior).
  *  - O gate roda com execSync (sincrono). Comandos sao executados a partir da
  *    raiz do projeto (app unico).
+ *  - O detector impeccable roda com execFileSync (SEM shell): o comando base
+ *    e parseado em [bin, ...args] e os filenames alterados entram como
+ *    argumentos vetoriais — nenhum caractere do nome de arquivo e interpretado
+ *    por shell (mitiga injecao via filename: $(), backticks, ;, &&...).
  *
  * NOTA SOBRE "SO" (Sistema Operacional)
  *  - Se o OpenCode rodar dentro do WSL/Linux, os comandos `npm` sao
@@ -60,7 +65,7 @@
  * ============================================================================
  */
 
-import { execSync, type ExecSyncOptions } from "node:child_process"
+import { execFileSync, execSync, type ExecSyncOptions } from "node:child_process"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -268,6 +273,49 @@ function execGateStep(step: QualityGateStep, cwd: string): ExecResult {
       stderr?: string | Buffer
       status?: number
       signal?: string
+    }
+    const stdout = e.stdout == null ? "" : String(e.stdout)
+    const stderr = e.stderr == null ? "" : String(e.stderr)
+    const status = e.status ?? -1
+    return { ok: false, output: `${stdout}\n${stderr}`.trim(), status }
+  }
+}
+
+/**
+ * Executa o detector impeccable SEM shell (execFileSync): `command` e
+ * parseado UMA vez em [bin, ...baseArgs] (comandos aqui nao tem paths com
+ * espacos — ex.: "node <script>") e os filenames sao anexados como
+ * argumentos vetoriais. Sem shell => $(), backticks, ";", "&&" etc. em
+ * filenames NUNCA sao interpretados (sem injecao via filename).
+ *
+ * NOTA WSL/Windows: este caminho NAO passa por resolveCommand — execFileSync
+ * nao invoca shell, entao nao ha prefixo WSL. No Windows nativo o bin resolve
+ * via PATH; alvo primario do plugin e Linux/WSL (limitacao documentada).
+ */
+function execDetectorStep(
+  command: string,
+  files: readonly string[],
+  timeoutMs: number,
+  cwd: string,
+): ExecResult {
+  const parts = command.split(/\s+/).filter(Boolean)
+  const bin = parts[0]
+  if (!bin) {
+    return { ok: false, output: `[detector] comando vazio: "${command}"`, status: -1 }
+  }
+  try {
+    const out = execFileSync(bin, [...parts.slice(1), ...files], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+    })
+    return { ok: true, output: String(out) }
+  } catch (err) {
+    const e = err as {
+      stdout?: string | Buffer
+      stderr?: string | Buffer
+      status?: number
     }
     const stdout = e.stdout == null ? "" : String(e.stdout)
     const stderr = e.stderr == null ? "" : String(e.stderr)
@@ -538,13 +586,12 @@ function runGate(gate: QualityGate, cwd: string, log: GateLogger): void {
         if (files.length < allUiFiles.length) {
           summary.push(`[OK] detector: ${allUiFiles.length} arquivos UI alterados — escaneando os ${files.length} primeiros (truncado)`)
         }
-        const quoted = files.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(" ")
-        const detStep: QualityGateStep = {
-          label: "impeccable detector",
-          command: `${det.command} ${quoted}`,
-          timeoutMs: det.timeoutMs,
-        }
-        const res = execGateStep(detStep, cwd)
+        // Execucao SEM shell (execFileSync): det.command e parseado em
+        // [bin, ...baseArgs] e os filenames entram como argumentos vetoriais.
+        // Nada passa por shell => $(), backticks, ";" etc. em filenames nunca
+        // sao interpretados (sem injecao via filename). Sem prefixo WSL aqui
+        // (execFileSync nao usa shell) — alvo primario: Linux/WSL.
+        const res = execDetectorStep(det.command, files, det.timeoutMs, cwd)
         if (res.ok) {
           summary.push("[OK] impeccable detector: sem anti-padroes")
         } else {
