@@ -13,21 +13,38 @@
  * Args:
  *   --path <arquivo> : caminho do JSONL (default: .opencode/pipeline/metrics.jsonl)
  *   --json           : saída JSON em vez de texto
+ *   --version / -v   : imprime a versão do package.json da raiz e sai
  *
  * Sem deps externas. Tolerante a linhas vazias/corrompidas.
  * ============================================================================
  */
 
 import { existsSync, readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 
 const DEFAULT_PATH = ".opencode/pipeline/metrics.jsonl"
+
+function resolvePkgVersion() {
+  try {
+    const pkgPath = fileURLToPath(new URL("../../package.json", import.meta.url))
+    if (!existsSync(pkgPath)) return "unknown"
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"))
+    const version = pkg?.version
+    return typeof version === "string" && version !== "" ? version : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
 
 function parseArgs(argv) {
   let metricsPath = DEFAULT_PATH
   let jsonOutput = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === "--path" && i + 1 < argv.length) {
+    if (arg === "--version" || arg === "-v") {
+      console.log(resolvePkgVersion())
+      process.exit(0)
+    } else if (arg === "--path" && i + 1 < argv.length) {
       metricsPath = argv[i + 1] ?? DEFAULT_PATH
       i++
     } else if (arg === "--json") {
