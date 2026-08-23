@@ -85,6 +85,13 @@ Converter as regras de prosa do pipeline multi-agente em mecanismos verificávei
 - Testes leves locais (`vitest run` / `tsc --noEmit`), não o gate completo do plugin (`build` + `test:coverage`); complementa TDD (RED → GREEN → REFACTOR) sem conflitar com a regra de não rodar verificações pesadas fora do gate.
 - `dev-backend.md` inaplicável: projeto React-only — arquivo não existe (deletado na adaptação React/Vite); FASE 4 aplicada somente ao `dev-frontend`.
 
+## FASE 5 — decisões (aprovadas em 2026-08-22)
+
+- **Telemetria JSONL**: `.opencode/pipeline/metrics.ts` com tipo `MetricEvent { ts, evento: "gate_run"|"gate_fail"|"retry"|"transicao"|"commit"|"escala_humano", taskId, detalhe? }` e funções `recordMetric(metricsPath, event)` (append JSONL, cria dir, nunca throw), `readMetrics`, `clearMetrics` (útil p/ testes). `metricsPath` default `.opencode/pipeline/metrics.jsonl` relativo à raiz; `.gitignore` desde FASE 1.
+- **Report**: `.opencode/pipeline/report.mjs` (node executável, sem deps, shebang, chmod +x) lê JSONL tolerante (ignora vazias/corrompidas) e calcula: taxa reprovação = gate_fail/gate_run, média retries = retry / tasks distintas, tempo médio por fase (média de durações em transicao com detalhe.duracao/duration — senão "N/A"), concluídas vs escaladas (commit vs escala_humano counts), total eventos, tasks distintas. Flags `--path <arquivo>` e `--json`.
+- **Plugin**: `OPTIONS.metricsEnabled=true, metricsPath="..."`; importa `recordMetric`; emite em cada ponto relevante dentro de try/catch (gate_run ao iniciar runGate, gate_fail+retry/escala dentro de processarFalhaGate, transicao bem-sucedida após fase concluída e após gate passar, commit via bash guard sucesso). `__internals` expõe `recordMetric` p/ testes.
+- **Comando**: `.opencode/commands/pipeline-report.md` com descrição + passos para rodar o report.
+
 ## Limitação GitNexus documentada
 
 Índice não cobre `.opencode/plugins/*.ts` (`impact(PipelineOrchestrator)` → not found,

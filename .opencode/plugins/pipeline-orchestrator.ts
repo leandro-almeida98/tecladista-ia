@@ -89,6 +89,7 @@ import {
   type RegistryEntry,
   type RegistryFile,
 } from "../pipeline/registry.ts"
+import { recordMetric } from "../pipeline/metrics.ts"
 
 // ============================================================================
 // 1) CONFIGURACAO DO QUALITY GATE —  EDITE AQUI OS COMANDOS EXATOS  ==========
@@ -245,6 +246,10 @@ const OPTIONS = {
   registryEnabled: true,
   /** Caminho do state.json RELATIVO à raiz do projeto (directory). */
   statePath: ".opencode/pipeline/state.json",
+  /** Telemetria JSONL (FASE 5): quando true, grava eventos em metrics.jsonl. */
+  metricsEnabled: true,
+  /** Caminho do metrics.jsonl RELATIVO à raiz do projeto (directory). */
+  metricsPath: ".opencode/pipeline/metrics.jsonl",
   /**
    * FASE 2 — targets autorizados a receber delegação `task`. Qualquer outro
    * target é bloqueado mecanicamente ANTES da validação do registry
@@ -988,9 +993,34 @@ async function processarFalhaGate(input: {
   const novoRetries = ativa.retries + 1
   const agente = input.sourceAgent ?? "dev-frontend"
 
+  // FASE 5 — telemetria gate_fail (antes de retry/escala)
+  if (OPTIONS.metricsEnabled) {
+    try {
+      const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
+      recordMetric(metricsPath, {
+        ts: new Date().toISOString(),
+        evento: "gate_fail",
+        taskId: ativa.taskId,
+        detalhe: { motivo, source: agente },
+      })
+    } catch {}
+  }
+
   // ---- Esgotado: escala humana estruturada -------------------------------
   if (novoRetries > OPTIONS.maxRetries) {
     escalarHumano(sp, ativa.taskId, motivo)
+    // FASE 5 — telemetria escala_humano
+    if (OPTIONS.metricsEnabled) {
+      try {
+        const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
+        recordMetric(metricsPath, {
+          ts: new Date().toISOString(),
+          evento: "escala_humano",
+          taskId: ativa.taskId,
+          detalhe: { motivo, retries: novoRetries },
+        })
+      } catch {}
+    }
     const suspeitos = extrairArquivosSuspeitos(input.gateError.message)
     const faseAtual =
       ativa.fases.find((f) => f.status === "em_andamento")?.nome ??
@@ -1022,6 +1052,18 @@ async function processarFalhaGate(input: {
   }
   if (spawn != null && spawn.promptEnviado) {
     registrarRetry(sp, ativa.taskId, { motivo, modo: "auto", sessionId: spawn.id })
+    // FASE 5 — telemetria retry (auto)
+    if (OPTIONS.metricsEnabled) {
+      try {
+        const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
+        recordMetric(metricsPath, {
+          ts: new Date().toISOString(),
+          evento: "retry",
+          taskId: ativa.taskId,
+          detalhe: { motivo, modo: "auto", sessionId: spawn.id, retries: novoRetries },
+        })
+      } catch {}
+    }
     await input.log(
       "warn",
       `[PIPELINE-RETRY] retry #${novoRetries}/${OPTIONS.maxRetries} lançado automaticamente no ${agente} (sessão ${spawn.id})`,
@@ -1042,6 +1084,23 @@ async function processarFalhaGate(input: {
     modo: "orquestrador",
     ...(spawn != null ? { sessionId: spawn.id } : {}),
   })
+  // FASE 5 — telemetria retry (orquestrador)
+  if (OPTIONS.metricsEnabled) {
+    try {
+      const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
+      recordMetric(metricsPath, {
+        ts: new Date().toISOString(),
+        evento: "retry",
+        taskId: ativa.taskId,
+        detalhe: {
+          motivo,
+          modo: "orquestrador",
+          ...(spawn != null ? { sessionId: spawn.id } : {}),
+          retries: novoRetries,
+        },
+      })
+    } catch {}
+  }
   await input.log(
     "warn",
     spawn != null
@@ -1064,6 +1123,22 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
       await client.app.log({ body: { service: "pipeline-orchestrator", level, message } })
     } catch {
       // log nunca deve quebrar o fluxo do plugin
+    }
+  }
+
+  // FASE 5 — helper de telemetria (nunca quebra o fluxo principal)
+  const emitMetric = (evento: string, taskId: string, detalhe?: unknown): void => {
+    if (!OPTIONS.metricsEnabled) return
+    try {
+      const metricsPath = join(rootDir, OPTIONS.metricsPath)
+      recordMetric(metricsPath, {
+        ts: new Date().toISOString(),
+        evento: evento as never,
+        taskId,
+        detalhe,
+      })
+    } catch {
+      // nunca quebrar
     }
   }
 
@@ -1144,6 +1219,10 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                   ]
                 writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
                 await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
+                // FASE 5 — transicao bem-sucedida
+                try {
+                  emitMetric("transicao", ativa.taskId, { fase: faseNome })
+                } catch {}
               }
             } catch (err) {
               await log(
@@ -1318,6 +1397,18 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
               ? `Transicao para ${OPTIONS.targetAgent}: rodando ${gate.label}`
               : `Transicao para ${OPTIONS.targetAgent} sem fonte dev rastreada (ex.: correção automática via sessão spawnada) — rodando ${gate.label}`,
           )
+          // FASE 5 — gate_run ao iniciar runGate
+          try {
+            if (OPTIONS.metricsEnabled) {
+              const sp = join(rootDir, OPTIONS.statePath)
+              let taskId = "unknown"
+              try {
+                const ativa = getActiveEntry(readRegistry(sp))
+                if (ativa) taskId = ativa.taskId
+              } catch {}
+              emitMetric("gate_run", taskId, { gate: gate.label, source: source ?? "unknown" })
+            }
+          } catch {}
           try {
             runGate(gate, rootDir, log, (result) => {
               // FASE 2: cada step vira GateResult em entry.gateResults (ok E
@@ -1351,6 +1442,18 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 )
               }
             }
+            // FASE 5 — transicao bem-sucedida (gate passou -> code-reviewer)
+            try {
+              if (OPTIONS.metricsEnabled) {
+                const sp = join(rootDir, OPTIONS.statePath)
+                let taskId = "unknown"
+                try {
+                  const ativa = getActiveEntry(readRegistry(sp))
+                  if (ativa) taskId = ativa.taskId
+                } catch {}
+                emitMetric("transicao", taskId, { gate: gate.label, para: OPTIONS.targetAgent })
+              }
+            } catch {}
           } catch (err) {
             // -----------------------------------------------------------
             // FASE 3: loop de auto-correção AO REDOR do throw do gate — o
@@ -1443,6 +1546,12 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 `para a tarefa ativa (${ativa.taskId}). Pré-condição: aprove explicitamente via question (commit/push + resposta afirmativa).`,
               )
             }
+            // FASE 5 — telemetria commit (bash guard sucesso)
+            if (OPTIONS.metricsEnabled) {
+              try {
+                emitMetric("commit", ativa.taskId, { command })
+              } catch {}
+            }
           } else if (/\bgit\b/.test(command) && !ativa) {
             // git add/status/diff etc.: exige somente entrada ativa.
             throw new Error(
@@ -1517,6 +1626,8 @@ export const __internals: {
   extrairPathsCitados: typeof extrairPathsCitados
   extrairArquivosSuspeitos: typeof extrairArquivosSuspeitos
   PATH_CITADO_RE: RegExp
+  // telemetria (FASE 5)
+  recordMetric: typeof recordMetric
   // constantes de configuração (readonly no nível de tipo)
   readonly QUALITY_GATES: QualityGate[]
   readonly COVERAGE_THRESHOLDS: Record<string, number>
@@ -1553,6 +1664,7 @@ export const __internals: {
   extrairPathsCitados,
   extrairArquivosSuspeitos,
   PATH_CITADO_RE,
+  recordMetric,
   QUALITY_GATES,
   COVERAGE_THRESHOLDS,
   OPTIONS,
