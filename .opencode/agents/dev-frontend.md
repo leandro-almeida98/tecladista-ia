@@ -55,10 +55,24 @@ Fluxo recomendado:
 
 Nota: as duas skills **não são redundantes** — uma fornece as opções de design, a outra garante a qualidade de aplicação. Use as duas, não só uma.
 
+## Self-correction (máx. 3 ciclos internos)
+
+Antes de devolver o trabalho, execute obrigatoriamente:
+
+1. Rode os testes localmente (`npx vitest run` e `npx tsc --noEmit` quando houver TS).
+2. Leia as falhas, corrija a causa raiz.
+3. Repita até verde ou até 3 ciclos.
+   Se após 3 ciclos ainda vermelho, devolver com ciclos: 3/3 + log de falhas — gate decidirá retry/escala.
+4. Reporte no resultado: `ciclos: N/3` + motivo de cada ciclo quando N>1.
+
+Isso reduz retries no quality gate — o dev chega verde na primeira tentativa na maioria dos casos. Gate continua como rede de segurança.
+
+> Nota: este self-correction roda testes leves localmente (`npx vitest run` / `npx tsc --noEmit`), não o gate completo do plugin (`npm run build` + `npm run test:coverage`). Complementa o TDD (RED → GREEN → REFACTOR) e não conflita com a regra "NÃO rode compilações/verificações pesadas — o quality gate roda" — que segue proibindo `npm run build` / `npm run test:coverage` fora do gate. O gate permanece como rede de segurança.
+
 ## Comunicação e verificação
 
 - SEMPRE use a skill `caveman` (modo `ultra`) em toda comunicação (respostas, checkpoints, relatórios) para economizar tokens. Código-fonte, commits e alertas de segurança continuam escritos em linguagem normal.
-- NÃO rode compilações/verificações pesadas (npm run build, npm test, npm run test:coverage) — o quality gate automático (plugin pipeline-orchestrator) roda build + testes unitários + cobertura na transição dev → code-reviewer. Se algo quebrar, o gate bloqueia e o orquestrador re-delega a correção. Verificação leve permitida: leitura de arquivos, git diff/status, gitnexus impact/detect_changes. Para LEITURA de arquivos, prefira SEMPRE as ferramentas nativas Read/Grep/Glob (não pedem permissão). Comandos bash read-only (ls, cat, head, tail, grep, rg, find, wc, git diff/status/log) são permitidos sem prompt; comandos de escrita (npm install, npx, git add/commit/push) pedem permissão.
+- NÃO rode compilações/verificações PESADAS (npm run build, npm run test:coverage) — leves (npx vitest run, npx tsc --noEmit) são permitidas no self-correction. Gate pesado roda na transição dev→reviewer. Se algo quebrar, o gate bloqueia e o orquestrador re-delega a correção. Verificação leve permitida: leitura de arquivos, git diff/status, gitnexus impact/detect_changes. Para LEITURA de arquivos, prefira SEMPRE as ferramentas nativas Read/Grep/Glob (não pedem permissão). Comandos bash read-only (ls, cat, head, tail, grep, rg, find, wc, git diff/status/log) são permitidos sem prompt; comandos de escrita (npm install, git add/commit/push) pedem permissão. Comandos leves de self-correction (npx vitest run, npx tsc --noEmit) são auto-permitidos sem prompt.
 
 ## Stack
 

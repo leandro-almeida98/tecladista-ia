@@ -79,6 +79,12 @@ Converter as regras de prosa do pipeline multi-agente em mecanismos verificávei
   Delegações permanecem bloqueadas até intervenção.
 - `OPTIONS`: `maxRetries`, `autoRetryEnabled`, `autoSpawnRetry` (capability-detect).
 
+## FASE 4 — decisões (aprovadas em 2026-08-21)
+
+- Self-correction de até 3 ciclos internos no `dev-frontend.md` antes de devolver: `npx vitest run` + `npx tsc --noEmit`, corrigir causa raiz, reportar `ciclos: N/3` (+ motivo quando N>1); reduz retries no quality gate, que segue como rede de segurança.
+- Testes leves locais (`vitest run` / `tsc --noEmit`), não o gate completo do plugin (`build` + `test:coverage`); complementa TDD (RED → GREEN → REFACTOR) sem conflitar com a regra de não rodar verificações pesadas fora do gate.
+- `dev-backend.md` inaplicável: projeto React-only — arquivo não existe (deletado na adaptação React/Vite); FASE 4 aplicada somente ao `dev-frontend`.
+
 ## Limitação GitNexus documentada
 
 Índice não cobre `.opencode/plugins/*.ts` (`impact(PipelineOrchestrator)` → not found,
