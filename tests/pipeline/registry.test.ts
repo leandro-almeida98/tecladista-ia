@@ -56,6 +56,7 @@ function validEntry(): RegistryEntry {
   return {
     taskId: "minha-feature-lz1234-ab12cd34",
     feature: "Minha feature",
+    retryHistory: [],
     fases: [
       {
         nome: "planejamento",

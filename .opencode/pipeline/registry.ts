@@ -74,6 +74,19 @@ export interface DetectChangesReport {
   changedCount?: number
 }
 
+/**
+ * Um ciclo de retry do quality gate (FASE 3): cada falha de gate appenda um
+ * item. `modo` reflete o que aconteceu: "auto" (spawn SDK bem-sucedido) ou
+ * "orquestrador" (fallback de re-delegação manual / escala humana).
+ * `sessionId` presente só quando houve spawn automático.
+ */
+export interface RetryHistoryItem {
+  ts: string
+  motivo: string
+  modo: "auto" | "orquestrador"
+  sessionId?: string
+}
+
 /** Uma tarefa do pipeline (uma feature). */
 export interface RegistryEntry {
   taskId: string
@@ -83,6 +96,8 @@ export interface RegistryEntry {
   fases: PipelineFase[]
   gateResults: GateResult[]
   retries: number
+  /** Histórico de ciclos de retry do gate (FASE 3); [] na criação. */
+  retryHistory: RetryHistoryItem[]
   aprovacaoHumana: AprovacaoHumana | null
   /** Relatório detect_changes registrado na revisão (FASE 2); null até lá. */
   detectChangesReport: DetectChangesReport | null
@@ -188,6 +203,32 @@ export function validateEntry(entry: unknown): void {
 
   if (typeof e.retries !== "number" || !Number.isInteger(e.retries) || e.retries < 0) {
     throw new Error('[PIPELINE-REGISTRY] Campo inválido: "retries" deve ser inteiro >= 0.')
+  }
+
+  // FASE 3: retryHistory — undefined/null tolerados por compatibilidade com
+  // entradas da FASE 1/2 já persistidas em disco; itens validados quando há.
+  if (e.retryHistory !== undefined && e.retryHistory !== null) {
+    if (!Array.isArray(e.retryHistory)) {
+      throw new Error('[PIPELINE-REGISTRY] Campo inválido: "retryHistory" deve ser array.')
+    }
+    for (const item of e.retryHistory) {
+      if (item == null || typeof item !== "object") {
+        throw new Error('[PIPELINE-REGISTRY] Campo inválido: cada item de "retryHistory" deve ser um objeto.')
+      }
+      const r = item as Record<string, unknown>
+      assertNonEmptyString(r.ts, "retryHistory[].ts")
+      assertNonEmptyString(r.motivo, "retryHistory[].motivo")
+      if (r.modo !== "auto" && r.modo !== "orquestrador") {
+        throw new Error(
+          '[PIPELINE-REGISTRY] Campo inválido: "retryHistory[].modo" deve ser "auto" ou "orquestrador".',
+        )
+      }
+      if (r.sessionId !== undefined && typeof r.sessionId !== "string") {
+        throw new Error(
+          '[PIPELINE-REGISTRY] Campo inválido: "retryHistory[].sessionId" deve ser string.',
+        )
+      }
+    }
   }
 
   // FASE 2: designDoc — string não vazia ou null. `undefined` tolerado por
@@ -344,6 +385,7 @@ export function createEntry(input: {
     ],
     gateResults: [],
     retries: 0,
+    retryHistory: [],
     aprovacaoHumana: null,
     detectChangesReport: null,
   }
@@ -435,4 +477,94 @@ export function aprovar(statePath: string, taskId: string, por: string): void {
     statePath,
     updateEntry(arquivo, taskId, { aprovacaoHumana: { por, em: new Date().toISOString() } }),
   )
+}
+
+// ============================================================================
+// HELPERS DE RETRY (FASE 3 — loop de auto-correção; persistem via writeRegistry)
+// ============================================================================
+
+/**
+ * Appenda um ciclo de retry ao `retryHistory` da entrada `taskId` E incrementa
+ * `retries`, persistindo. O shape do item é validado no writeRegistry (antes de
+ * qualquer escrita): item inválido lança e mantém o arquivo original intacto.
+ */
+export function registrarRetry(
+  statePath: string,
+  taskId: string,
+  input: { motivo: string; modo: "auto" | "orquestrador"; sessionId?: string },
+): void {
+  const arquivo = readRegistry(statePath)
+  const entry = arquivo.tarefas.find((t) => t.taskId === taskId)
+  if (!entry) {
+    throw new Error(`[PIPELINE-REGISTRY] taskId não encontrado no registry: ${taskId}`)
+  }
+  const item: RetryHistoryItem = {
+    ts: new Date().toISOString(),
+    motivo: input.motivo,
+    modo: input.modo,
+    ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+  }
+  writeRegistry(
+    statePath,
+    updateEntry(arquivo, taskId, {
+      retryHistory: [...(entry.retryHistory ?? []), item],
+      retries: entry.retries + 1,
+    }),
+  )
+}
+
+/**
+ * Escala a entrada `taskId` para intervenção humana:
+ *   - marca a fase atual (em_andamento) com status "escala_humano" — ou anexa
+ *     uma fase "desenvolvimento" escalada se nenhuma estiver em andamento;
+ *   - registra o `motivo` como último item do retryHistory (modo
+ *     "orquestrador") e incrementa `retries` (a escala conta como tentativa).
+ * Fase final => entrada deixa de ser ativa (isActive) e delegações permanecem
+ * bloqueadas até intervenção humana mover o status para fora do final.
+ */
+export function escalarHumano(statePath: string, taskId: string, motivo: string): void {
+  const arquivo = readRegistry(statePath)
+  const entry = arquivo.tarefas.find((t) => t.taskId === taskId)
+  if (!entry) {
+    throw new Error(`[PIPELINE-REGISTRY] taskId não encontrado no registry: ${taskId}`)
+  }
+  const agora = new Date().toISOString()
+  const alvo = entry.fases.find((f) => f.status === "em_andamento")
+  const fases = alvo
+    ? entry.fases.map((f) =>
+        f === alvo ? { ...f, status: "escala_humano" as const } : f,
+      )
+    : [
+        ...entry.fases,
+        {
+          nome: "desenvolvimento",
+          agente: "dev-frontend",
+          status: "escala_humano" as const,
+          iniciadoEm: agora,
+          concluidoEm: null,
+        },
+      ]
+  writeRegistry(
+    statePath,
+    updateEntry(arquivo, taskId, {
+      fases,
+      retries: entry.retries + 1,
+      retryHistory: [
+        ...(entry.retryHistory ?? []),
+        { ts: agora, motivo, modo: "orquestrador" },
+      ],
+    }),
+  )
+}
+
+/**
+ * Zera `retries` da entrada `taskId` (chamado quando o gate passa). O
+ * `retryHistory` é PRESERVADO — histórico completo de ciclos não se apaga.
+ */
+export function resetarRetries(statePath: string, taskId: string): void {
+  const arquivo = readRegistry(statePath)
+  if (!arquivo.tarefas.some((t) => t.taskId === taskId)) {
+    throw new Error(`[PIPELINE-REGISTRY] taskId não encontrado no registry: ${taskId}`)
+  }
+  writeRegistry(statePath, updateEntry(arquivo, taskId, { retries: 0 }))
 }

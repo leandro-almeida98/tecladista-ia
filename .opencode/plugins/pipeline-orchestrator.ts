@@ -75,10 +75,13 @@ import type { Plugin } from "@opencode-ai/plugin"
 import {
   aprovar,
   createEntry,
+  escalarHumano,
   getActiveEntry,
   readRegistry,
   registrarDetectChanges,
   registrarGateResult,
+  registrarRetry,
+  resetarRetries,
   updateEntry,
   writeRegistry,
   type DetectChangesReport,
@@ -216,8 +219,15 @@ const OPTIONS = {
   wslPrefix: "wsl",
   /** Bytes maximos da mensagem de erro (trunca o restante). */
   maxErrorBytes: 4000,
-  /** Se o agente fonte for desconhecido, roda o gate do frontend (default false = nao bloqueia). */
-  gateOnUnknownSource: false,
+  /**
+   * Fonte dev desconhecida na transição ao reviewer => roda o gate do frontend
+   * (neste projeto só existe um gate). DEFAULT TRUE (revisão FASE 3): a sessão
+   * de correção spawnada via client.session.create/promptAsync NÃO passa pela
+   * tool `task`, logo lastCompletedGateSource nunca rearma — sem este flag, a
+   * transição pós-correção automática PULARIA o gate. Com true, fonte
+   * desconhecida => gate roda (nunca "pulado" por falta de rastreio).
+   */
+  gateOnUnknownSource: true,
 
   // -------- REGISTRY DO PIPELINE (FASE 1 — harness verificável) --------
   /**
@@ -241,6 +251,23 @@ const OPTIONS = {
    * ("[PIPELINE-REGISTRY] ... não autorizado"). Readonly por design.
    */
   allowedTargets: ["dev-frontend", "code-reviewer"] as const,
+
+  // -------- LOOP DE AUTO-CORREÇÃO (FASE 3 — harness verificável) --------
+  /**
+   * Quando o gate FALHA na transição dev→reviewer:
+   *   - retries <= maxRetries: registra ciclo em entry.retryHistory e tenta
+   *     spawn automático de sessão de correção no dev de origem via SDK
+   *     (client.session.create + session.promptAsync — capability-detect);
+   *     spawn indisponível/falho => throw estruturado obrigando o orquestrador
+   *     a re-delegar (fallback semi-automático, modo "orquestrador");
+   *   - retries > maxRetries: escalarHumano (fase escala_humano, entrada
+   *     inativa) + relatório estruturado com arquivos suspeitos;
+   *   - gate PASSA: resetarRetries (retries volta a 0; histórico preservado).
+   * autoRetryEnabled=false preserva o comportamento legado (throw puro do gate).
+   */
+  maxRetries: 2,
+  autoRetryEnabled: true,
+  autoSpawnRetry: true,
 
   // -------- DOCKER COMPOSE (apos gate aprovado) --------
   /**
@@ -629,6 +656,62 @@ function questionAprovaPipeline(args: unknown, output: unknown): boolean {
   }
 }
 
+// ============================================================================
+// 3d) LOOP DE AUTO-CORREÇÃO (FASE 3 — harness verificável) ===================
+// ============================================================================
+
+/** Tamanho máximo do motivo gravado em retryHistory (1ª linha do erro). */
+const MAX_MOTIVO_LEN = 200
+
+/**
+ * Motivo compacto do erro do gate para o retryHistory/relatório de escala
+ * (trim + truncado em MAX_MOTIVO_LEN). Revisão FASE 3 (WARN 1): o header
+ * "[PIPELINE-ORCHESTRATOR] ... FALHOU" é genérico e esconde o step real —
+ *   1. se existir, prefere a PRIMEIRA linha contendo "[FALHOU]" (ex.:
+ *      "[FALHOU] build (exit 2)");
+ *   2. sem linha "[FALHOU]", concatena o header (1ª linha não vazia) com a
+ *      primeira linha de falha seguinte (ignorando "CWD: ...").
+ */
+function primeiroMotivo(erro: string): string {
+  const linhas = erro.split(/\r?\n/).map((l) => l.trim())
+  const linhaFalha = linhas.find((l) => l.includes("[FALHOU]"))
+  if (linhaFalha) return linhaFalha.slice(0, MAX_MOTIVO_LEN)
+  const naoVazias = linhas.filter((l) => l !== "")
+  const header = naoVazias[0] ?? ""
+  const detalhe = naoVazias.slice(1).find((l) => !l.startsWith("CWD:") && l !== header) ?? ""
+  return (detalhe === "" ? header : `${header} — ${detalhe}`).slice(0, MAX_MOTIVO_LEN)
+}
+
+/**
+ * Paths de arquivo citados no texto (failure lines): tokens com ao menos um
+ * separador "/" e extensão de código conhecida. Dedup preservando ordem.
+ */
+const PATH_CITADO_RE =
+  /\b[\w@.-]+(?:\/[\w@.-]+)+\.(?:tsx?|jsx?|mjs|cjs|css|scss|sass|less|html|json)\b/g
+
+function extrairPathsCitados(texto: string): string[] {
+  return [...new Set([...texto.matchAll(PATH_CITADO_RE)].map((m) => m[0] ?? ""))].filter(Boolean)
+}
+
+/**
+ * Arquivos suspeitos do relatório de escala: união dedup (ordem estável,
+ * mesmo teto MAX_COVERAGE_TARGETS) dos targets de cobertura extraídos do
+ * output + paths citados nas failure lines.
+ */
+function extrairArquivosSuspeitos(output: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  const add = (raw: string | undefined) => {
+    const name = (raw ?? "").trim()
+    if (!name || seen.has(name) || out.length >= MAX_COVERAGE_TARGETS) return
+    seen.add(name)
+    out.push(name)
+  }
+  for (const t of extractFailedCoverageTargets(output)) add(t)
+  for (const p of extrairPathsCitados(output)) add(p)
+  return out
+}
+
 /**
  * Roda todos os steps de um gate; joga erro se qualquer um falhar.
  *
@@ -811,6 +894,163 @@ function runGate(
       }
     }
   }
+}
+
+// ============================================================================
+// 3e) SPAWN DE CORREÇÃO + PROCESSAMENTO DA FALHA DO GATE (FASE 3) ============
+// ============================================================================
+
+/**
+ * Tenta spawnar uma sessão de correção no agente informado via SDK do
+ * opencode (capability-detect com try/catch): `client.session.create` cria a
+ * sessão e `client.session.promptAsync` envia a instrução fire-and-forget
+ * (não bloqueia esperando o agente terminar).
+ *
+ * Retorna:
+ *   - null ................. superfície indisponível (métodos ausentes, sem id
+ *     na resposta, erro no create) => fallback manual puro;
+ *   - {id, promptEnviado:true} .. spawn completo => modo "auto";
+ *   - {id, promptEnviado:false} .. create OK mas promptAsync falhou (revisão
+ *     FASE 3, INFO 1): o sessionId volta MESMO ASSIM para auditoria no
+ *     retryHistory; o chamador usa o fallback "orquestrador".
+ */
+type SpawnCorrecao = { id: string; promptEnviado: boolean }
+
+async function tentarSpawnCorrecao(
+  client: unknown,
+  instrucao: string,
+  titulo: string,
+  agente: string,
+): Promise<SpawnCorrecao | null> {
+  type SessionApi = {
+    create?: (args: unknown) => Promise<unknown>
+    promptAsync?: (args: unknown) => Promise<unknown>
+  }
+  const session = (client as { session?: SessionApi } | null | undefined)?.session
+  if (
+    !session ||
+    typeof session.create !== "function" ||
+    typeof session.promptAsync !== "function"
+  ) {
+    return null
+  }
+  try {
+    const criada = (await session.create({ body: { title: titulo } })) as
+      | { data?: { id?: unknown }; id?: unknown }
+      | null
+      | undefined
+    const id = criada?.data?.id ?? criada?.id
+    if (id == null || id === "") return null
+    let promptEnviado = true
+    try {
+      await session.promptAsync({
+        path: { id: String(id) },
+        body: { agent: agente, parts: [{ type: "text", text: instrucao }] },
+      })
+    } catch {
+      // create OK + prompt falho: sessionId preservado p/ auditoria (INFO 1).
+      promptEnviado = false
+    }
+    return { id: String(id), promptEnviado }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * FASE 3 — caminho do gate FALHO na transição dev→reviewer. SEMPRE lança:
+ *   - [PIPELINE-ESCALA] quando retries esgotam (escala humana gravada no
+ *     registry; entrada fica inativa e delegações permanecem bloqueadas);
+ *   - [PIPELINE-RETRY] nos ciclos de retry — modo "auto" quando o spawn SDK
+ *     funciona, "orquestrador" no fallback de re-delegação manual;
+ *   - rethrow do erro ORIGINAL quando autoRetry não se aplica (registry
+ *     ilegível ou nenhuma entrada ativa).
+ * Os GateResults já foram gravados pelo collector do runGate antes daqui.
+ */
+async function processarFalhaGate(input: {
+  gateError: Error
+  rootDir: string
+  client: unknown
+  log: GateLogger
+  sourceAgent: string | null
+}): Promise<never> {
+  const sp = join(input.rootDir, OPTIONS.statePath)
+  let ativa: RegistryEntry | null = null
+  try {
+    ativa = getActiveEntry(readRegistry(sp))
+  } catch {
+    // Sem registry utilizável => comportamento legado (throw puro do gate).
+    throw input.gateError
+  }
+  if (!ativa) throw input.gateError
+
+  const motivo = primeiroMotivo(input.gateError.message)
+  const novoRetries = ativa.retries + 1
+  const agente = input.sourceAgent ?? "dev-frontend"
+
+  // ---- Esgotado: escala humana estruturada -------------------------------
+  if (novoRetries > OPTIONS.maxRetries) {
+    escalarHumano(sp, ativa.taskId, motivo)
+    const suspeitos = extrairArquivosSuspeitos(input.gateError.message)
+    const faseAtual =
+      ativa.fases.find((f) => f.status === "em_andamento")?.nome ??
+      ativa.fases[ativa.fases.length - 1]?.nome ??
+      "desenvolvimento"
+    await input.log(
+      "error",
+      `[PIPELINE-ESCALA] tarefa ${ativa.taskId} escalada para intervenção humana`,
+    )
+    throw new Error(
+      `[PIPELINE-ESCALA] MAX_RETRIES esgotado (${OPTIONS.maxRetries}).\n` +
+        `Fase: ${faseAtual}\n` +
+        `Tentativas: ${novoRetries}\n` +
+        `Erro final: ${motivo}\n` +
+        `Arquivos suspeitos:\n${suspeitos.map((a) => `- ${a}`).join("\n")}\n` +
+        `Intervenção humana necessária.`,
+    )
+  }
+
+  // ---- Ciclo de retry: spawn automático ou fallback orquestrador ----------
+  let spawn: SpawnCorrecao | null = null
+  if (OPTIONS.autoSpawnRetry) {
+    spawn = await tentarSpawnCorrecao(
+      input.client,
+      `${input.gateError.message}\n\nCorrija os problemas acima, rode o build/testes localmente até ficarem verdes e conclua a tarefa.`,
+      `Retry ${novoRetries}/${OPTIONS.maxRetries}: ${ativa.feature}`,
+      agente,
+    )
+  }
+  if (spawn != null && spawn.promptEnviado) {
+    registrarRetry(sp, ativa.taskId, { motivo, modo: "auto", sessionId: spawn.id })
+    await input.log(
+      "warn",
+      `[PIPELINE-RETRY] retry #${novoRetries}/${OPTIONS.maxRetries} lançado automaticamente no ${agente} (sessão ${spawn.id})`,
+    )
+    // Revisão FASE 3 (CRITICAL — camada de texto): a sessão spawnada não passa
+    // pela tool `task`; o orquestrador precisa saber que a delegação seguinte
+    // ao reviewer RODA o gate (fonte desconhecida + gateOnUnknownSource=true).
+    throw new Error(
+      `[PIPELINE-RETRY] Gate falhou — retry #${novoRetries}/${OPTIONS.maxRetries} lançado AUTOMATICAMENTE no ${agente} (sessão ${spawn.id}). Transição bloqueada até a correção concluir. ` +
+      `Após a sessão de correção concluir, delegue ao @${OPTIONS.targetAgent} — o quality gate rodará automaticamente (fonte desconhecida => gate do frontend).`,
+    )
+  }
+  // Fallback "orquestrador": re-delegação manual. Quando o create OK mas o
+  // promptAsync falhou (spawn != null), o sessionId criado vai MESMO ASSIM no
+  // item do retryHistory para auditoria (revisão FASE 3, INFO 1).
+  registrarRetry(sp, ativa.taskId, {
+    motivo,
+    modo: "orquestrador",
+    ...(spawn != null ? { sessionId: spawn.id } : {}),
+  })
+  await input.log(
+    "warn",
+    spawn != null
+      ? `[PIPELINE-RETRY] retry #${novoRetries}/${OPTIONS.maxRetries} — re-delegação manual ao ${agente} necessária (sessão ${spawn.id} criada mas prompt não entregue)`
+      : `[PIPELINE-RETRY] retry #${novoRetries}/${OPTIONS.maxRetries} — re-delegação manual ao ${agente} necessária`,
+  )
+  throw new Error(
+    `[PIPELINE-RETRY] Gate falhou — retry #${novoRetries}/${OPTIONS.maxRetries}. RE-DELEGUE ao @${agente} imediatamente com este erro:\n\n${input.gateError.message}`,
+  )
 }
 
 // ============================================================================
@@ -1023,6 +1263,23 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
 
           if (target === "dev-frontend") {
             if (!ativa) {
+              // -----------------------------------------------------------
+              // PÓS-ESCALA (revisão FASE 3, WARN 2): entrada escalada fica
+              // INATIVA (fase escala_humano = final) — sem este bloqueio, a
+              // delegação ao dev criaria uma tarefa NOVA contornando a
+              // intervenção humana exigida. Qualquer entrada no registry com
+              // alguma fase em escala_humano trava a criação.
+              // -----------------------------------------------------------
+              const escalada = (arquivo?.tarefas ?? []).find((t) =>
+                t.fases.some((f) => f.status === "escala_humano"),
+              )
+              if (escalada) {
+                throw new Error(
+                  `[PIPELINE-ESCALA] Existe tarefa em escala humana (${escalada.taskId}) — ` +
+                  `intervenção humana obrigatória antes de iniciar nova tarefa. ` +
+                  `Resolva editando/removendo a entrada em ${OPTIONS.statePath}.`,
+                )
+              }
               // FASE 2 — planejamento→dev: criação exige design doc
               // referenciado nos args E existente em disco.
               const designDoc = extrairDesignDoc(output.args)
@@ -1055,7 +1312,12 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
             : undefined
 
         if (gate) {
-          await log("info", `Transicao para ${OPTIONS.targetAgent}: rodando ${gate.label}`)
+          await log(
+            "info",
+            source
+              ? `Transicao para ${OPTIONS.targetAgent}: rodando ${gate.label}`
+              : `Transicao para ${OPTIONS.targetAgent} sem fonte dev rastreada (ex.: correção automática via sessão spawnada) — rodando ${gate.label}`,
+          )
           try {
             runGate(gate, rootDir, log, (result) => {
               // FASE 2: cada step vira GateResult em entry.gateResults (ok E
@@ -1072,11 +1334,52 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 )
               }
             })
+
+            // -----------------------------------------------------------
+            // FASE 3: gate PASSOU => zera retries da entrada ativa
+            // (retryHistory preservado). Falha de registry: só warn.
+            // -----------------------------------------------------------
+            if (OPTIONS.registryEnabled) {
+              try {
+                const sp = join(rootDir, OPTIONS.statePath)
+                const ativa = getActiveEntry(readRegistry(sp))
+                if (ativa && ativa.retries !== 0) resetarRetries(sp, ativa.taskId)
+              } catch (err) {
+                void log(
+                  "warn",
+                  `[REGISTRY] falha ao resetar retries: ${err instanceof Error ? err.message : String(err)}`,
+                )
+              }
+            }
+          } catch (err) {
+            // -----------------------------------------------------------
+            // FASE 3: loop de auto-correção AO REDOR do throw do gate — o
+            // throw continua existindo; muda o que acontece ao redor dele
+            // (registro do ciclo, spawn automático ou escala humana).
+            // autoRetryEnabled=false preserva o comportamento legado.
+            // -----------------------------------------------------------
+            const gateError = err instanceof Error ? err : new Error(String(err))
+            if (OPTIONS.registryEnabled && OPTIONS.autoRetryEnabled) {
+              await processarFalhaGate({
+                gateError,
+                rootDir,
+                client,
+                log,
+                sourceAgent: lastCompletedGateSource,
+              })
+            }
+            throw gateError
           } finally {
             lastCompletedGateSource = null // nao repetir o mesmo gate sem nova task dev
           }
         } else {
-          await log("warn", `Transicao para ${OPTIONS.targetAgent} sem fonte dev rastreada — gate pulado`)
+          // Só alcançável com gateOnUnknownSource=false (ou nenhum gate
+          // cadastrado para a fonte): o gate NÃO é mais pulado por falta de
+          // rastreio quando o flag está ativo (default true — revisão FASE 3).
+          await log(
+            "warn",
+            `Transicao para ${OPTIONS.targetAgent} sem fonte dev rastreada e sem gate para a fonte — gate pulado (gateOnUnknownSource=${OPTIONS.gateOnUnknownSource}).`,
+          )
         }
         return
       }
@@ -1204,6 +1507,16 @@ export const __internals: {
   questionAprovaPipeline: typeof questionAprovaPipeline
   DESIGN_DOC_RE: RegExp
   GIT_COMMIT_PUSH_RE: RegExp
+  // loop de auto-correção (FASE 3)
+  registrarRetry: typeof registrarRetry
+  escalarHumano: typeof escalarHumano
+  resetarRetries: typeof resetarRetries
+  processarFalhaGate: typeof processarFalhaGate
+  tentarSpawnCorrecao: typeof tentarSpawnCorrecao
+  primeiroMotivo: typeof primeiroMotivo
+  extrairPathsCitados: typeof extrairPathsCitados
+  extrairArquivosSuspeitos: typeof extrairArquivosSuspeitos
+  PATH_CITADO_RE: RegExp
   // constantes de configuração (readonly no nível de tipo)
   readonly QUALITY_GATES: QualityGate[]
   readonly COVERAGE_THRESHOLDS: Record<string, number>
@@ -1231,6 +1544,15 @@ export const __internals: {
   questionAprovaPipeline,
   DESIGN_DOC_RE,
   GIT_COMMIT_PUSH_RE,
+  registrarRetry,
+  escalarHumano,
+  resetarRetries,
+  processarFalhaGate,
+  tentarSpawnCorrecao,
+  primeiroMotivo,
+  extrairPathsCitados,
+  extrairArquivosSuspeitos,
+  PATH_CITADO_RE,
   QUALITY_GATES,
   COVERAGE_THRESHOLDS,
   OPTIONS,

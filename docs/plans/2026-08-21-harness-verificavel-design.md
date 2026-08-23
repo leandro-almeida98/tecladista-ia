@@ -67,6 +67,18 @@ Converter as regras de prosa do pipeline multi-agente em mecanismos verificávei
 - Dívidas FASE 1 quitadas: W2 (invariante violada bloqueia tudo até correção manual do state),
   `OPTIONS.allowedTargets`, validação de shape de `gateResults`.
 
+## FASE 3 — decisões (aprovadas em 2026-08-21)
+
+- Gate falho → registra ciclo de retry (`entry.retryHistory: [{ts, motivo, modo}]`),
+  `retries++` (reset a 0 quando o gate passa).
+- `retries ≤ OPTIONS.maxRetries (2)`: tenta spawn automático de task de correção no dev
+  de origem via SDK (`client.session.*`) com o erro completo; spawn indisponível →
+  fallback semi-auto (throw estruturado obrigando o orquestrador a re-delegar).
+- Esgotado: fase = `escala_humano` + relatório estruturado (fase, erro, tentativas,
+  arquivos suspeitos = coverage targets ∪ paths citados nas linhas de falha).
+  Delegações permanecem bloqueadas até intervenção.
+- `OPTIONS`: `maxRetries`, `autoRetryEnabled`, `autoSpawnRetry` (capability-detect).
+
 ## Limitação GitNexus documentada
 
 Índice não cobre `.opencode/plugins/*.ts` (`impact(PipelineOrchestrator)` → not found,

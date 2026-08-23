@@ -41,6 +41,7 @@ src/
 - TODA nova funcionalidade deve incluir testes unitários (Vitest/Testing Library) e pelo menos um cenário automatizado no Cypress; quando não houver tela, usar cenário de API pelo Cypress
 - A meta mínima de cobertura é 95% POR ARQUIVO, priorizando cobertura unitária; nenhuma funcionalidade deve ser considerada concluída sem medir e reportar a cobertura
 - O quality gate automático (plugin `pipeline-orchestrator`) roda build, teste unitário e cobertura na transição dev → code-reviewer. Após o gate passar, o plugin sobe o docker compose automaticamente (`docker compose up -d --build`, configurável em `OPTIONS.composeUpOnGatePass`) quando existir `docker-compose.yml` na raiz; se ausente, o compose é pulado sem bloquear.
+- **Loop de auto-correção (FASE 3)**: gate falho registra o ciclo em `entry.retryHistory` e tenta spawn automático de correção no dev de origem via SDK; após `OPTIONS.maxRetries` (2) tentativas, a tarefa entra em `escala_humano` no registry e as delegações ficam bloqueadas até intervenção humana. Gate passando zera `retries`.
 - SEMPRE tipagem forte (TS strict)
 - SEMPRE `ui-ux-pro-max` + `impeccable` antes de criar/modificar UI
 - SEMPRE skill `brainstorming` no planejamento do orquestrador: obrigatória antes de qualquer tarefa criativa (nova funcionalidade/componente/página/mudança de comportamento) — explorar contexto, perguntar 1 por vez, propor 2-3 abordagens e apresentar design com aprovação do usuário antes de delegar implementação (HARD-GATE)

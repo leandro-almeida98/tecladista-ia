@@ -65,8 +65,9 @@ Ao delegar `@code-reviewer`, o plugin roda ANTES da revisão, de forma síncrona
 | --------------- | -------------------------------------------------------------------- |
 | `@dev-frontend` | `npm run build` → `npm test` → `npm run test:coverage` (95%/arquivo) |
 
-- **Falhou** (teste, build ou cobertura < limite em `COVERAGE_THRESHOLDS`): o plugin **bloqueia** a delegação. Orquestrador re-delega a correção ao dev de origem e só tenta a revisão depois que o gate passar.
-- **Passou**: fluxo natural segue para o `@code-reviewer`.
+- **Falhou** (teste, build ou cobertura < limite em `COVERAGE_THRESHOLDS`): o plugin **bloqueia** a delegação, registra o ciclo em `entry.retryHistory` e tenta spawn automático de correção no dev de origem via SDK; sem spawn disponível, lança `[PIPELINE-RETRY]` exigindo re-delegação imediata ao dev. Orquestrador re-delega a correção ao dev de origem e só tenta a revisão depois que o gate passar.
+- **MAX_RETRIES (2) esgotado**: tarefa entra em `escala_humano` no registry (`[PIPELINE-ESCALA]` com fase, tentativas e arquivos suspeitos); delegações ficam bloqueadas até intervenção humana.
+- **Passou**: fluxo natural segue para o `@code-reviewer` (plugin zera `retries`; histórico preservado).
 - Limites de cobertura são editados em `COVERAGE_THRESHOLDS` (topo do plugin).
 - **Bootstrap**: enquanto o projeto não tiver `package.json` na raiz (pré-scaffold), o gate é pulado com warn — não bloqueia.
 - Nenhuma ação manual do orquestrador: o gate é acionado automaticamente na transição para o code-reviewer.

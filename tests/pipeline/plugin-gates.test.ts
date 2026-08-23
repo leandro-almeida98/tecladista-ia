@@ -698,12 +698,15 @@ describe("hooks do plugin — transição de gate", () => {
 
     expect(messages().some((m) => m.includes("rodando Quality Gate FRONTEND"))).toBe(true)
 
-    // Fonte resetada no finally: segunda transição sem nova task dev => pulado.
+    // Fonte resetada no finally: segunda transição sem nova task dev => fonte
+    // desconhecida, mas gateOnUnknownSource=true => gate do frontend RODA.
     await callBefore(hooks, "task", { subagent_type: "code-reviewer" })
-    expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    const msgs = messages()
+    expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    expect(msgs.filter((m) => m.includes("rodando Quality Gate FRONTEND")).length).toBe(2)
   })
 
-  test("deveBloquearTransicao_quandoGateFalha_eResetarFonteNoFinallyMesmoComThrow", async () => {
+  test("deveReRodarGateComRetry2_quandoFonteResetadaEGateFalhaDeNovo", async () => {
     criarTarefaAtiva()
     setFsFlags({ pkg: true })
     failExecOn("npm run build", { stdout: "error TS2307: boom", stderr: "", status: 2 })
@@ -711,9 +714,18 @@ describe("hooks do plugin — transição de gate", () => {
 
     await callAfter(hooks, { subagent_type: "dev-frontend", completed: true })
     await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).rejects.toThrow(/FALHOU/)
-    // finally resetou a fonte mesmo com throw:
-    await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
+    // finally resetou a fonte mesmo com throw; a nova transição NÃO pula o
+    // gate: roda de novo (fonte desconhecida => gate frontend) e falha de novo.
+    await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).rejects.toThrow(
+      /retry #2\/2/,
+    )
     expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+  })
+
+  test("gateOnUnknownSource_deveEstarAtivoPorDefault_camadaMecanica", () => {
+    // CRITICAL (revisão FASE 3): spawn automático não passa pela tool `task`;
+    // sem este flag, a transição pós-correção automática pularia o gate.
+    expect(__internals.OPTIONS.gateOnUnknownSource).toBe(true)
   })
 
   test("deveRodarGateSemFonteRastreada_quandoGateOnUnknownSourceAtivo", async () => {
@@ -733,11 +745,20 @@ describe("hooks do plugin — transição de gate", () => {
     }
   })
 
-  test("devePularGateComWarn_quandoTransicaoSemFonteRastreada", async () => {
+  test("devePularGateComWarn_quandoGateOnUnknownSourceDesativado", async () => {
     criarTarefaAtiva()
-    const hooks = await makeHooks()
-    await callBefore(hooks, "task", { subagent_type: "code-reviewer" })
-    expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    const opt = __internals.OPTIONS as unknown as { gateOnUnknownSource: boolean }
+    const original = opt.gateOnUnknownSource
+    opt.gateOnUnknownSource = false
+    try {
+      const hooks = await makeHooks()
+      await callBefore(hooks, "task", { subagent_type: "code-reviewer" })
+      const msgs = messages()
+      expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+      expect(msgs.some((m) => m.includes("gate pulado"))).toBe(true)
+    } finally {
+      opt.gateOnUnknownSource = original
+    }
   })
 
   test("deveBloquearTargetNaoAutorizado_mesmoComEntradaAtiva_FASE2", async () => {

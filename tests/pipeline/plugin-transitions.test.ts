@@ -208,7 +208,8 @@ describe("before task — allowedTargets (FASE 2)", () => {
         description: `Feature — design em ${designDoc}`,
       }),
     ).resolves.toBeUndefined()
-    // Entrada ativa criada acima; code-reviewer é autorizado (gate pulado sem fonte rastreada).
+    // Entrada ativa criada acima; code-reviewer é autorizado (fonte desconhecida
+    // => gateOnUnknownSource roda o gate; execSync mockado "ok" => passa).
     await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
   })
 
@@ -286,6 +287,70 @@ describe("before task — design doc pré-condição (FASE 2)", () => {
       prompt: `seguir ${designDoc} à risca`,
     })
     expect((lerTarefas()[0] as RegistryEntry).designDoc).toBe(designDoc)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PÓS-ESCALA: entrada escalada bloqueia criação de tarefa nova (revisão FASE 3)
+// ---------------------------------------------------------------------------
+describe("before task — bloqueio pós-escala humana", () => {
+  function criarEntradaEscalada(feature: string): RegistryEntry {
+    const entry = createEntry({ feature })
+    const escalada: RegistryEntry = {
+      ...entry,
+      fases: entry.fases.map((f) =>
+        f.nome === "desenvolvimento" ? { ...f, status: "escala_humano" as const } : f,
+      ),
+    }
+    writeRegistry(statePath(), { versao: 1, tarefas: [escalada] })
+    return escalada
+  }
+
+  test("deveBloquearCriacaoNovaTarefa_quandoExisteEntradaEmEscalaHumana", async () => {
+    const escalada = criarEntradaEscalada("Feature travada")
+    const designDoc = criarDesignDoc("2026-08-22-nova-design.md")
+    const hooks = await makeHooks()
+
+    await expect(
+      callBefore(hooks, "task", {
+        subagent_type: "dev-frontend",
+        description: `Nova feature — ${designDoc}`,
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `\\[PIPELINE-ESCALA\\] Existe tarefa em escala humana \\(${escalada.taskId}\\) — ` +
+        "intervenção humana obrigatória antes de iniciar nova tarefa\\. " +
+        `Resolva editando/removendo a entrada em \\.opencode/pipeline/state\\.json\\.`,
+      ),
+    )
+    // Nada foi criado: registry permanece só com a entrada escalada.
+    expect(lerTarefas()).toHaveLength(1)
+    expect((lerTarefas()[0] as RegistryEntry).feature).toBe("Feature travada")
+  })
+
+  test("devePermitirCriacao_quandoEntradaEscaladaRemovidaDoStateJson", async () => {
+    criarEntradaEscalada("Feature removida")
+    const designDoc = criarDesignDoc("2026-08-22-pos-fix-design.md")
+    const hooks = await makeHooks()
+
+    // Intervenção humana: remove a entrada do state.json.
+    realFs.rmSync(statePath())
+
+    await callBefore(hooks, "task", {
+      subagent_type: "dev-frontend",
+      description: `Depois da limpeza — ${designDoc}`,
+    })
+    expect(lerTarefas()).toHaveLength(1)
+    expect((lerTarefas()[0] as RegistryEntry).feature).toContain("Depois da limpeza")
+  })
+
+  test("bloqueioDeEscala_deveVirAntesDaExigenciaDeDesignDoc", async () => {
+    criarEntradaEscalada("Feature travada 2")
+    const hooks = await makeHooks()
+    // Sem design doc nos args: mesmo assim o erro é o de ESCALA (checagem primeiro).
+    await expect(
+      callBefore(hooks, "task", { subagent_type: "dev-frontend", description: "Sem design doc" }),
+    ).rejects.toThrow(/\[PIPELINE-ESCALA\] Existe tarefa em escala humana/)
   })
 })
 
