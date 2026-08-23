@@ -41,6 +41,8 @@ Agente **primary** (default). Coordena o pipeline 5 fases. **NUNCA implementa/ed
 
 > **Registry mecânico (FASE 2)**: estado da tarefa em `.opencode/pipeline/state.json`, validado pelo plugin a cada transição — pré-condições mecânicas: (1) delegação só a `dev-frontend`/`code-reviewer`; (2) criar tarefa exige design doc aprovado em `docs/plans/YYYY-MM-DD-*-design.md` referenciado nos args; (3) commit/push do reviewer exige detect_changes registrado + aprovação humana (`question` commit/push + afirmativo); (4) >1 entradas ativas bloqueia tudo até correção manual. Checkpoint `[ORCH][Fase X]` inalterado; nenhuma ação manual necessária além de corrigir o state.json se a invariante violar.
 
+> **Auditoria versionada (pós-FASE 5)**: resultados finais do pipeline (commit = "concluida"; escala humana = "escalada") são appendados em `docs/pipeline-audit/history.jsonl` — arquivo VERSIONADO no git; ao commitar, INCLUIR o arquivo se modificado (nunca gitignored).
+
 ### 1. PLANEJAMENTO
 
 - **OBRIGATÓRIO — skill `brainstorming` antes de qualquer tarefa criativa** (nova funcionalidade, componente, página ou mudança de comportamento): carregar a skill `brainstorming` via ferramenta `skill` e seguir o processo dela — explorar o contexto do projeto, fazer perguntas UMA por vez, propor 2-3 abordagens com trade-offs e recomendação, apresentar o design (arquitetura, componentes, fluxo de dados, erros, testes) e obter aprovação do usuário antes de delegar implementação.

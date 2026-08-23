@@ -90,6 +90,12 @@ import {
   type RegistryFile,
 } from "../pipeline/registry.ts"
 import { recordMetric } from "../pipeline/metrics.ts"
+import {
+  appendAudit,
+  montarAuditEntry,
+  readAudit,
+  type AuditResultado,
+} from "../pipeline/audit.ts"
 
 // ============================================================================
 // 1) CONFIGURACAO DO QUALITY GATE —  EDITE AQUI OS COMANDOS EXATOS  ==========
@@ -250,6 +256,16 @@ const OPTIONS = {
   metricsEnabled: true,
   /** Caminho do metrics.jsonl RELATIVO à raiz do projeto (directory). */
   metricsPath: ".opencode/pipeline/metrics.jsonl",
+  /**
+   * Auditoria VERSIONADA (pós-FASE 5): quando true, appenda AuditEntry em
+   * `docs/pipeline-audit/history.jsonl` — arquivo VERSIONADO NO GIT (não
+   * gitignored) nos pontos de resultado final: commit (resultado "concluida",
+   * bash guard sucesso) e escala_humano (processarFalhaGate). Nunca quebra o
+   * fluxo principal (try/catch; appendAudit/readAudit também nunca lançam).
+   */
+  auditEnabled: true,
+  /** Caminho do history.jsonl RELATIVO à raiz do projeto (directory). */
+  auditPath: "docs/pipeline-audit/history.jsonl",
   /**
    * FASE 2 — targets autorizados a receber delegação `task`. Qualquer outro
    * target é bloqueado mecanicamente ANTES da validação do registry
@@ -662,7 +678,50 @@ function questionAprovaPipeline(args: unknown, output: unknown): boolean {
 }
 
 // ============================================================================
-// 3d) LOOP DE AUTO-CORREÇÃO (FASE 3 — harness verificável) ===================
+// 3d) AUDITORIA VERSIONADA + ENRIQUECIMENTO DE MÉTRICAS (pós-FASE 5) =========
+// ============================================================================
+
+/**
+ * Campos de enriquecimento dos eventos de métrica: `{ feature, designDoc }`
+ * da entrada real — SOMENTE quando existirem (nunca inventar valores:
+ * feature vazio ou designDoc null => chave omitida).
+ */
+function enriquecimentoEntrada(
+  entry: Pick<RegistryEntry, "feature" | "designDoc"> | null | undefined,
+): { feature?: string; designDoc?: string } {
+  if (!entry) return {}
+  return {
+    ...(typeof entry.feature === "string" && entry.feature !== ""
+      ? { feature: entry.feature }
+      : {}),
+    ...(typeof entry.designDoc === "string" && entry.designDoc !== ""
+      ? { designDoc: entry.designDoc }
+      : {}),
+  }
+}
+
+/**
+ * Appenda a entrada ativa no JSONL de auditoria VERSIONADO com o resultado
+ * informado ("concluida" no commit; "escalada" na escala humana). Snapshot
+ * opcional pós-mutação do registry (ex.: re-read após escalarHumano para
+ * capturar fases/retryHistory atualizados). NUNCA lança nem quebra o fluxo.
+ */
+function auditarEntrada(input: {
+  rootDir: string
+  entry: RegistryEntry
+  resultado: AuditResultado
+}): void {
+  if (!OPTIONS.auditEnabled) return
+  try {
+    const auditPath = join(input.rootDir, OPTIONS.auditPath)
+    appendAudit(auditPath, montarAuditEntry(input.entry, input.resultado))
+  } catch {
+    // auditoria nunca quebra o fluxo principal
+  }
+}
+
+// ============================================================================
+// 3e) LOOP DE AUTO-CORREÇÃO (FASE 3 — harness verificável) ===================
 // ============================================================================
 
 /** Tamanho máximo do motivo gravado em retryHistory (1ª linha do erro). */
@@ -902,7 +961,7 @@ function runGate(
 }
 
 // ============================================================================
-// 3e) SPAWN DE CORREÇÃO + PROCESSAMENTO DA FALHA DO GATE (FASE 3) ============
+// 3f) SPAWN DE CORREÇÃO + PROCESSAMENTO DA FALHA DO GATE (FASE 3) ============
 // ============================================================================
 
 /**
@@ -993,7 +1052,8 @@ async function processarFalhaGate(input: {
   const novoRetries = ativa.retries + 1
   const agente = input.sourceAgent ?? "dev-frontend"
 
-  // FASE 5 — telemetria gate_fail (antes de retry/escala)
+  // FASE 5 — telemetria gate_fail (antes de retry/escala); pós-FASE 5:
+  // detalhe enriquecido com feature/designDoc da entrada real.
   if (OPTIONS.metricsEnabled) {
     try {
       const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
@@ -1001,7 +1061,7 @@ async function processarFalhaGate(input: {
         ts: new Date().toISOString(),
         evento: "gate_fail",
         taskId: ativa.taskId,
-        detalhe: { motivo, source: agente },
+        detalhe: { motivo, source: agente, ...enriquecimentoEntrada(ativa) },
       })
     } catch {}
   }
@@ -1009,7 +1069,17 @@ async function processarFalhaGate(input: {
   // ---- Esgotado: escala humana estruturada -------------------------------
   if (novoRetries > OPTIONS.maxRetries) {
     escalarHumano(sp, ativa.taskId, motivo)
-    // FASE 5 — telemetria escala_humano
+    // Snapshot PÓS-escala do registry: a auditoria versionada carrega as fases
+    // já marcadas escala_humano e o retryHistory completo (incl. motivo final).
+    let snapshot = ativa
+    try {
+      snapshot =
+        readRegistry(sp).tarefas.find((t) => t.taskId === ativa.taskId) ?? ativa
+    } catch {}
+    // Auditoria VERSIONADA (pós-FASE 5): resultado "escalada" — antes da
+    // métrica; nunca quebra o fluxo (auditarEntrada/appendAudit engolem IO).
+    auditarEntrada({ rootDir: input.rootDir, entry: snapshot, resultado: "escalada" })
+    // FASE 5 — telemetria escala_humano (detalhe enriquecido)
     if (OPTIONS.metricsEnabled) {
       try {
         const metricsPath = join(input.rootDir, OPTIONS.metricsPath)
@@ -1017,7 +1087,11 @@ async function processarFalhaGate(input: {
           ts: new Date().toISOString(),
           evento: "escala_humano",
           taskId: ativa.taskId,
-          detalhe: { motivo, retries: novoRetries },
+          detalhe: {
+            motivo,
+            retries: novoRetries,
+            ...enriquecimentoEntrada(ativa),
+          },
         })
       } catch {}
     }
@@ -1060,7 +1134,13 @@ async function processarFalhaGate(input: {
           ts: new Date().toISOString(),
           evento: "retry",
           taskId: ativa.taskId,
-          detalhe: { motivo, modo: "auto", sessionId: spawn.id, retries: novoRetries },
+          detalhe: {
+          motivo,
+          modo: "auto",
+          sessionId: spawn.id,
+          retries: novoRetries,
+          ...enriquecimentoEntrada(ativa),
+        },
         })
       } catch {}
     }
@@ -1097,6 +1177,7 @@ async function processarFalhaGate(input: {
           modo: "orquestrador",
           ...(spawn != null ? { sessionId: spawn.id } : {}),
           retries: novoRetries,
+          ...enriquecimentoEntrada(ativa),
         },
       })
     } catch {}
@@ -1219,9 +1300,12 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                   ]
                 writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
                 await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
-                // FASE 5 — transicao bem-sucedida
+                // FASE 5 — transicao bem-sucedida (pós-FASE 5: enriquecida)
                 try {
-                  emitMetric("transicao", ativa.taskId, { fase: faseNome })
+                  emitMetric("transicao", ativa.taskId, {
+                    fase: faseNome,
+                    ...enriquecimentoEntrada(ativa),
+                  })
                 } catch {}
               }
             } catch (err) {
@@ -1397,16 +1481,21 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
               ? `Transicao para ${OPTIONS.targetAgent}: rodando ${gate.label}`
               : `Transicao para ${OPTIONS.targetAgent} sem fonte dev rastreada (ex.: correção automática via sessão spawnada) — rodando ${gate.label}`,
           )
-          // FASE 5 — gate_run ao iniciar runGate
+          // FASE 5 — gate_run ao iniciar runGate (pós-FASE 5: enriquecido)
           try {
             if (OPTIONS.metricsEnabled) {
               const sp = join(rootDir, OPTIONS.statePath)
               let taskId = "unknown"
+              let entrada: RegistryEntry | null = null
               try {
-                const ativa = getActiveEntry(readRegistry(sp))
-                if (ativa) taskId = ativa.taskId
+                entrada = getActiveEntry(readRegistry(sp))
+                if (entrada) taskId = entrada.taskId
               } catch {}
-              emitMetric("gate_run", taskId, { gate: gate.label, source: source ?? "unknown" })
+              emitMetric("gate_run", taskId, {
+                gate: gate.label,
+                source: source ?? "unknown",
+                ...enriquecimentoEntrada(entrada),
+              })
             }
           } catch {}
           try {
@@ -1442,16 +1531,22 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 )
               }
             }
-            // FASE 5 — transicao bem-sucedida (gate passou -> code-reviewer)
+            // FASE 5 — transicao bem-sucedida (gate passou -> code-reviewer;
+            // pós-FASE 5: enriquecida com feature/designDoc da entrada real)
             try {
               if (OPTIONS.metricsEnabled) {
                 const sp = join(rootDir, OPTIONS.statePath)
                 let taskId = "unknown"
+                let entrada: RegistryEntry | null = null
                 try {
-                  const ativa = getActiveEntry(readRegistry(sp))
-                  if (ativa) taskId = ativa.taskId
+                  entrada = getActiveEntry(readRegistry(sp))
+                  if (entrada) taskId = entrada.taskId
                 } catch {}
-                emitMetric("transicao", taskId, { gate: gate.label, para: OPTIONS.targetAgent })
+                emitMetric("transicao", taskId, {
+                  gate: gate.label,
+                  para: OPTIONS.targetAgent,
+                  ...enriquecimentoEntrada(entrada),
+                })
               }
             } catch {}
           } catch (err) {
@@ -1546,10 +1641,17 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 `para a tarefa ativa (${ativa.taskId}). Pré-condição: aprove explicitamente via question (commit/push + resposta afirmativa).`,
               )
             }
-            // FASE 5 — telemetria commit (bash guard sucesso)
+            // Auditoria VERSIONADA (pós-FASE 5): resultado "concluida" —
+            // ANTES da métrica; nunca quebra o fluxo principal.
+            auditarEntrada({ rootDir, entry: ativa, resultado: "concluida" })
+            // FASE 5 — telemetria commit (bash guard sucesso; pós-FASE 5:
+            // detalhe enriquecido com feature/designDoc da entrada real)
             if (OPTIONS.metricsEnabled) {
               try {
-                emitMetric("commit", ativa.taskId, { command })
+                emitMetric("commit", ativa.taskId, {
+                  command,
+                  ...enriquecimentoEntrada(ativa),
+                })
               } catch {}
             }
           } else if (/\bgit\b/.test(command) && !ativa) {
@@ -1628,6 +1730,11 @@ export const __internals: {
   PATH_CITADO_RE: RegExp
   // telemetria (FASE 5)
   recordMetric: typeof recordMetric
+  // auditoria versionada + enriquecimento (pós-FASE 5)
+  appendAudit: typeof appendAudit
+  readAudit: typeof readAudit
+  montarAuditEntry: typeof montarAuditEntry
+  enriquecimentoEntrada: typeof enriquecimentoEntrada
   // constantes de configuração (readonly no nível de tipo)
   readonly QUALITY_GATES: QualityGate[]
   readonly COVERAGE_THRESHOLDS: Record<string, number>
@@ -1665,6 +1772,10 @@ export const __internals: {
   extrairArquivosSuspeitos,
   PATH_CITADO_RE,
   recordMetric,
+  appendAudit,
+  readAudit,
+  montarAuditEntry,
+  enriquecimentoEntrada,
   QUALITY_GATES,
   COVERAGE_THRESHOLDS,
   OPTIONS,

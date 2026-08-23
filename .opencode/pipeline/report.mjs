@@ -122,6 +122,17 @@ function main() {
   const mediaRetries = tasksDistintas > 0 ? retry / tasksDistintas : 0
   const mediaRetriesStr = tasksDistintas > 0 ? mediaRetries.toFixed(2) : "0.00"
 
+  // Features distintas (pós-FASE 5): nomes únicos em detalhe.feature dos
+  // eventos enriquecidos. Retrocompatível: eventos sem feature são ignorados.
+  const features = [
+    ...new Set(
+      events
+        .map((e) => (e.detalhe == null ? null : e.detalhe.feature))
+        .filter((f) => typeof f === "string" && f !== ""),
+    ),
+  ]
+  const featuresStr = features.length > 0 ? features.join(", ") : "N/A"
+
   // tempo médio por fase: média de durações em transicao events que tenham duração numérica
   let tempoMedioPorFase = null
   let tempoMedioStr = "N/A"
@@ -151,6 +162,8 @@ function main() {
     taxaReprovacaoStr,
     mediaRetries,
     mediaRetriesStr,
+    features,
+    featuresStr,
     tempoMedioPorFase,
     tempoMedioStr,
     concluidas: commit,
@@ -167,6 +180,7 @@ function main() {
       taxaReprovacao,
       taxaReprovacaoStr,
       mediaRetries: Number(mediaRetries.toFixed(2)),
+      features,
       tempoMedioPorFase,
       tempoMedioStr,
       concluidas: commit,
@@ -190,6 +204,7 @@ function main() {
     console.log(`Tasks distintas: ${tasksDistintas}`)
     console.log(`Taxa de reprovação de gate: ${taxaReprovacaoStr}`)
     console.log(`Média de retries por tarefa: ${mediaRetriesStr} (${retry} retries / ${tasksDistintas} tasks)`)
+    console.log(`Features: ${featuresStr}`)
     console.log(`Tempo médio por fase: ${tempoMedioStr}`)
     console.log(`Tarefas concluídas vs escaladas: ${commit} vs ${escala} (commit vs escala_humano)`)
     console.log(`Breakdown por evento: ${JSON.stringify(counts)}`)

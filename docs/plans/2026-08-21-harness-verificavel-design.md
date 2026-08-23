@@ -92,6 +92,14 @@ Converter as regras de prosa do pipeline multi-agente em mecanismos verificávei
 - **Plugin**: `OPTIONS.metricsEnabled=true, metricsPath="..."`; importa `recordMetric`; emite em cada ponto relevante dentro de try/catch (gate_run ao iniciar runGate, gate_fail+retry/escala dentro de processarFalhaGate, transicao bem-sucedida após fase concluída e após gate passar, commit via bash guard sucesso). `__internals` expõe `recordMetric` p/ testes.
 - **Comando**: `.opencode/commands/pipeline-report.md` com descrição + passos para rodar o report.
 
+## Auditoria versionada (pós-FASE 5)
+
+- **Problema**: `state.json`/`metrics.jsonl` são runtime gitignored — os detalhes operacionais da execução somem do histórico do git.
+- **Decisão**: novo módulo `.opencode/pipeline/audit.ts` com tipo `AuditEntry { ts, taskId, feature, designDoc, resultado: "concluida"|"escalada", fases, gateResults, retryHistory, aprovacaoHumana }` e funções `appendAudit(auditPath, entry)` (append JSONL, cria dir recursive, NUNCA throw; dedupe simples — última linha com mesmo taskId+resultado => skip, idempotência p/ re-commit) e `readAudit(auditPath)` (tolerante a linhas vazias/corrompidas/shapes inválidos). Default path RELATIVO à raiz: `docs/pipeline-audit/history.jsonl` — **VERSIONADO no git** (nunca gitignored).
+- **Plugin**: `OPTIONS.auditEnabled=true, auditPath="docs/pipeline-audit/history.jsonl"`; appenda nos pontos de resultado final — commit (bash guard sucesso => "concluida", ANTES da métrica) e escala_humano (`processarFalhaGate` => "escalada", snapshot PÓS-escala re-lido do registry p/ capturar fases/retryHistory atualizados); ambos try/catch. `__internals` expõe `appendAudit`/`readAudit`/`montarAuditEntry`.
+- **Enriquecimento das métricas**: onde há entrada real disponível, eventos (`gate_run`, `gate_fail`, `retry`, `transicao`, `commit`, `escala_humano`) ganham `{ feature, designDoc }` no detalhe — chaves omitidas quando ausentes (nunca inventar valores). `report.mjs` mostra linha `Features: <lista única>` (ou "N/A"), retrocompatível.
+- **Regra de commit**: ao commitar, INCLUIR `docs/pipeline-audit/history.jsonl` se modificado.
+
 ## Limitação GitNexus documentada
 
 Índice não cobre `.opencode/plugins/*.ts` (`impact(PipelineOrchestrator)` → not found,

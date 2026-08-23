@@ -14,11 +14,12 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi, type Mock } from "vitest"
 import { execFileSync, execSync } from "node:child_process"
-import { existsSync, mkdtempSync, rmSync, type PathLike } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, type PathLike } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
+import { readAudit } from "../../.opencode/pipeline/audit"
 import {
   createEntry,
   readRegistry,
@@ -725,5 +726,88 @@ describe("helpers FASE 3 — primeiroMotivo / extrairArquivosSuspeitos / tentarS
         sourceAgent: "dev-frontend",
       }),
     ).rejects.toBe(gateError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Auditoria VERSIONADA + enriquecimento de métricas (pós-FASE 5):
+//   - 3ª falha (escala humana) => history.jsonl ganha linha resultado
+//     "escalada" com feature/designDoc da entrada;
+//   - eventos de métrica (gate_fail/escala_humano/retry) carregam
+//     feature/designDoc quando há entrada real.
+// ---------------------------------------------------------------------------
+describe("Auditoria versionada (pós-FASE 5) — escala humana", () => {
+  function historyPath(): string {
+    return join(tmpDir, "docs", "pipeline-audit", "history.jsonl")
+  }
+
+  function metricsPath(): string {
+    return join(tmpDir, ".opencode", "pipeline", "metrics.jsonl")
+  }
+
+  function lerJsonl(path: string): Record<string, unknown>[] {
+    return readFileSync(path, "utf-8")
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+  }
+
+  test("deveGravarAuditoriaEscalada_quandoMaxRetriesEsgotado_comFeatureEDesignDoc", async () => {
+    const designDoc = "docs/plans/2026-08-21-harness-verificavel-design.md"
+    const entry = createEntry({ feature: "Feature escalável", designDoc })
+    writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
+    setFsFlags({ pkg: true })
+    falharBuild()
+    const hooks = await makeHooks()
+
+    await expect(falharTransicao(hooks)).rejects.toThrow(/retry #1\/2/)
+    await expect(falharTransicao(hooks)).rejects.toThrow(/retry #2\/2/)
+    await expect(falharTransicao(hooks)).rejects.toThrow(/\[PIPELINE-ESCALA\]/)
+
+    // Auditoria: EXATAMENTE 1 linha (retries intermediários NÃO auditam).
+    const auditoria = readAudit(historyPath())
+    expect(auditoria).toHaveLength(1)
+    expect(auditoria[0]?.resultado).toBe("escalada")
+    expect(auditoria[0]?.taskId).toBe(entry.taskId)
+    expect(auditoria[0]?.feature).toBe("Feature escalável")
+    expect(auditoria[0]?.designDoc).toBe(designDoc)
+    // Snapshot pós-escala: fase marcada escala_humano + histórico completo.
+    expect(auditoria[0]?.fases.some((f) => f.status === "escala_humano")).toBe(true)
+    expect((auditoria[0]?.retryHistory ?? []).length).toBeGreaterThanOrEqual(3)
+
+    // Métricas enriquecidas: gate_fail e escala_humano carregam feature/designDoc.
+    const eventos = lerJsonl(metricsPath())
+    const gateFails = eventos.filter((e) => e["evento"] === "gate_fail")
+    expect(gateFails.length).toBe(3)
+    for (const g of gateFails) {
+      const detalhe = g["detalhe"] as Record<string, unknown>
+      expect(detalhe["feature"]).toBe("Feature escalável")
+      expect(detalhe["designDoc"]).toBe(designDoc)
+    }
+    const escalas = eventos.filter((e) => e["evento"] === "escala_humano")
+    expect(escalas).toHaveLength(1)
+    const detalheEscala = escalas[0]?.["detalhe"] as Record<string, unknown>
+    expect(detalheEscala["feature"]).toBe("Feature escalável")
+    expect(detalheEscala["designDoc"]).toBe(designDoc)
+    expect(detalheEscala["motivo"]).toBeTruthy()
+  })
+
+  test("deveEnriquecerEventosRetry_comFeature_quandoCicloDeRetry", async () => {
+    const designDoc = "docs/plans/2026-08-21-harness-verificavel-design.md"
+    const entry = createEntry({ feature: "Feature em retry", designDoc })
+    writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
+    setFsFlags({ pkg: true })
+    falharBuild()
+    const hooks = await makeHooks()
+
+    await expect(falharTransicao(hooks)).rejects.toThrow(/retry #1\/2/)
+
+    const eventos = lerJsonl(metricsPath())
+    const retries = eventos.filter((e) => e["evento"] === "retry")
+    expect(retries).toHaveLength(1)
+    const detalhe = retries[0]?.["detalhe"] as Record<string, unknown>
+    expect(detalhe["modo"]).toBe("orquestrador")
+    expect(detalhe["feature"]).toBe("Feature em retry")
+    expect(detalhe["designDoc"]).toBe(designDoc)
   })
 })

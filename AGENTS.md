@@ -61,6 +61,8 @@ O agente principal/orquestrador é o único agente autorizado a chamar outros ag
 
 > **Registry mecânico (FASE 2)**: o estado da tarefa vive em `.opencode/pipeline/state.json` e o plugin valida mecanicamente 4 pré-condições (`[PIPELINE-REGISTRY]`): (1) delegação só a `dev-frontend`/`code-reviewer`; (2) criação de tarefa exige design doc aprovado em `docs/plans/YYYY-MM-DD-*-design.md` referenciado na tarefa; (3) `git commit/push` do reviewer exige `gitnexus_detect_changes` registrado + aprovação humana via `question` (commit/push + "sim"); (4) invariante de entrada única violada bloqueia TODA delegação até correção manual do state.json. Formato de checkpoint `[ORCH][Fase X]` inalterado.
 
+> **Auditoria versionada (pós-FASE 5)**: resultados finais do pipeline (commit = "concluida"; escala humana = "escalada") são appendados em `docs/pipeline-audit/history.jsonl` — arquivo VERSIONADO no git; ao commitar, INCLUIR o arquivo se modificado (nunca gitignored).
+
 Antes e depois de cada chamada `task_tool_set`, publique um checkpoint curto no chat principal usando este formato:
 
 ```text

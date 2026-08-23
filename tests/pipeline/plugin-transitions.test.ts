@@ -14,11 +14,12 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi, type Mock } from "vitest"
 import { execFileSync, execSync } from "node:child_process"
-import { existsSync, mkdtempSync, renameSync, rmSync, type PathLike } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, type PathLike } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
+import { readAudit } from "../../.opencode/pipeline/audit"
 import {
   createEntry,
   readRegistry,
@@ -591,6 +592,123 @@ describe("before bash — guarda de commit do reviewer (FASE 2)", () => {
     await expect(
       callBefore(hooks, "bash", { command: 'git commit -m "wip"' }),
     ).resolves.toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Auditoria VERSIONADA + métricas enriquecidas (pós-FASE 5):
+//   - commit com pré-condições ok => history.jsonl ganha linha resultado
+//     "concluida" com feature/designDoc corretos + métrica commit enriquecida;
+//   - gate_run/transicao carregam feature/designDoc quando há entrada real.
+// ---------------------------------------------------------------------------
+describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
+  function historyPath(): string {
+    return join(tmpDir, "docs", "pipeline-audit", "history.jsonl")
+  }
+
+  function metricsPath(): string {
+    return join(tmpDir, ".opencode", "pipeline", "metrics.jsonl")
+  }
+
+  function lerJsonl(path: string): Record<string, unknown>[] {
+    return readFileSync(path, "utf-8")
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+  }
+
+  test("deveGravarAuditoriaConcluida_eEnriquecerMetricaCommit_quandoPreCondicosOk", async () => {
+    const designDoc = "docs/plans/2026-08-21-harness-verificavel-design.md"
+    const entry = createEntry({ feature: "Feature commitada", designDoc })
+    writeRegistry(statePath(), {
+      versao: 1,
+      tarefas: [
+        {
+          ...entry,
+          detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" },
+          aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+        },
+      ],
+    })
+    sessionGetImpl = async () => ({ agent: "code-reviewer" })
+    const hooks = await makeHooks()
+
+    await expect(
+      callBefore(hooks, "bash", { command: 'git commit -m "feat: entrega"' }),
+    ).resolves.toBeUndefined()
+
+    // Auditoria VERSIONADA: 1 linha resultado "concluida" com snapshot completo.
+    const auditoria = readAudit(historyPath())
+    expect(auditoria).toHaveLength(1)
+    expect(auditoria[0]?.resultado).toBe("concluida")
+    expect(auditoria[0]?.taskId).toBe(entry.taskId)
+    expect(auditoria[0]?.feature).toBe("Feature commitada")
+    expect(auditoria[0]?.designDoc).toBe(designDoc)
+    expect(auditoria[0]?.aprovacaoHumana).toEqual({
+      por: "usuario",
+      em: "2026-08-21T16:00:00.000Z",
+    })
+    expect(auditoria[0]?.fases.length).toBeGreaterThan(0)
+    expect(Array.isArray(auditoria[0]?.gateResults)).toBe(true)
+
+    // Métrica commit ANTES da auditoria no fluxo; ambas ocorrem. Evento
+    // commit carrega command + feature + designDoc da entrada real.
+    const commits = lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")
+    expect(commits).toHaveLength(1)
+    const detalhe = commits[0]?.["detalhe"] as Record<string, unknown>
+    expect(detalhe["command"]).toBe('git commit -m "feat: entrega"')
+    expect(detalhe["feature"]).toBe("Feature commitada")
+    expect(detalhe["designDoc"]).toBe(designDoc)
+  })
+
+  test("deveEnriquecerGateRunETransicao_comFeatureEDesignDoc_quandoGatePassa", async () => {
+    const designDoc = "docs/plans/2026-08-21-harness-verificavel-design.md"
+    const entry = createEntry({ feature: "Feature de teste", designDoc })
+    writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
+    setFsFlags({ pkg: true, compose: false, detector: false })
+    execSyncMock.mockReturnValue("ok")
+    const hooks = await makeHooks()
+
+    await callAfterTask(hooks, { subagent_type: "dev-frontend", completed: true })
+    await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
+
+    const eventos = lerJsonl(metricsPath())
+    // gate_run: taskId real + feature/designDoc da entrada.
+    const gateRun = eventos.find((e) => e["evento"] === "gate_run")
+    expect(gateRun?.["taskId"]).toBe(entry.taskId)
+    const detalheRun = gateRun?.["detalhe"] as Record<string, unknown>
+    expect(detalheRun["feature"]).toBe("Feature de teste")
+    expect(detalheRun["designDoc"]).toBe(designDoc)
+    // transicao pós-gate (para reviewer): também enriquecida.
+    const posGate = eventos.filter(
+      (e) => e["evento"] === "transicao" && (e["detalhe"] as Record<string, unknown>)["para"] === "code-reviewer",
+    )
+    expect(posGate).toHaveLength(1)
+    const detalhePos = posGate[0]?.["detalhe"] as Record<string, unknown>
+    expect(detalhePos["feature"]).toBe("Feature de teste")
+    expect(detalhePos["designDoc"]).toBe(designDoc)
+  })
+
+  test("deveOmitirFeatureDesignDoc_quandoNenhumaEntradaAtiva_metricaSemInvencao", async () => {
+    // Gate SEM entrada real (registry desabilitado): taskId "unknown" e
+    // métrica SEM feature/designDoc — nunca inventar valores.
+    const registryOriginal = __internals.OPTIONS.registryEnabled
+    ;(__internals.OPTIONS as { registryEnabled: boolean }).registryEnabled = false
+    try {
+      setFsFlags({ pkg: true, compose: false, detector: false })
+      execSyncMock.mockReturnValue("ok")
+      const hooks = await makeHooks()
+      await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
+
+      const eventos = lerJsonl(metricsPath())
+      const gateRun = eventos.find((e) => e["evento"] === "gate_run") as Record<string, unknown>
+      expect(gateRun["taskId"]).toBe("unknown")
+      const detalhe = gateRun["detalhe"] as Record<string, unknown>
+      expect("feature" in detalhe).toBe(false)
+      expect("designDoc" in detalhe).toBe(false)
+    } finally {
+      ;(__internals.OPTIONS as { registryEnabled: boolean }).registryEnabled = registryOriginal
+    }
   })
 })
 
