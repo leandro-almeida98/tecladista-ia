@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
+import { PipelineOrchestrator, __internals } from "../../.opencode/pipeline/orchestrator-impl"
 import {
   createEntry,
   readRegistry,

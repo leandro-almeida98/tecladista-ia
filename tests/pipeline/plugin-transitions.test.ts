@@ -18,7 +18,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, type PathLik
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
+import { PipelineOrchestrator, __internals } from "../../.opencode/pipeline/orchestrator-impl"
 import { readAudit } from "../../.opencode/pipeline/audit"
 import {
   createEntry,

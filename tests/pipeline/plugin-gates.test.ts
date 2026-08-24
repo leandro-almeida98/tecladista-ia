@@ -15,7 +15,7 @@ import { existsSync, mkdtempSync, rmSync, type PathLike } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { PipelineOrchestrator, __internals } from "../../.opencode/plugins/pipeline-orchestrator"
+import { PipelineOrchestrator, __internals } from "../../.opencode/pipeline/orchestrator-impl"
 import { createEntry, readRegistry, writeRegistry, type RegistryEntry } from "../../.opencode/pipeline/registry"
 
 vi.mock("node:child_process", async (importOriginal) => {
