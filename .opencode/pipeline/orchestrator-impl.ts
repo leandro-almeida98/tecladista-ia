@@ -1246,8 +1246,21 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
     const mapped = subagentAgentBySession.get(sessionID)
     if (mapped) return mapped
     try {
-      const res = (await client.session.get({ path: { id: sessionID } })) as unknown as { agent?: string }
-      return res?.agent
+      // REGRESSÃO smoke 2026-08-24: o client do SDK do opencode envolve a
+      // resposta de session.get em { data, request, response } — o `agent`
+      // fica DENTRO de `data` (o tipo Session do SDK está desatualizado e não
+      // declara o campo). Ler `res.agent` no topo retornava SEMPRE undefined e
+      // o guard de commit do reviewer era pulado (commit passava sem auditoria
+      // "concluida" nem métrica commit). Fix: ler `data.agent` primeiro, com
+      // fallback para o shape direto (mocks de teste / responseStyle "data").
+      const res = (await client.session.get({ path: { id: sessionID } })) as unknown as
+        | { data?: { agent?: string } }
+        | { agent?: string }
+      const wrapped = res as { data?: { agent?: string } }
+      if (wrapped.data != null && typeof wrapped.data.agent === "string") {
+        return wrapped.data.agent
+      }
+      return (res as { agent?: string }).agent
     } catch {
       return undefined
     }

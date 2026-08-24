@@ -710,6 +710,47 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
       ;(__internals.OPTIONS as { registryEnabled: boolean }).registryEnabled = registryOriginal
     }
   })
+
+  test("deveRodarGuardDeCommit_quandoSessionGetRetornaShapeRealDoSDK (regressão smoke 2026-08-24)", async () => {
+    // REGRESSÃO REAL (smoke 2026-08-24): o SDK do opencode envolve a resposta
+    // de client.session.get em { data, request, response } — o `agent` fica
+    // DENTRO de `data`. O guard de commit lia `res.agent` (undefined) e era
+    // PULADO: o commit passava sem auditoria "concluida" nem métrica commit.
+    // Este teste usa o shape REAL do SDK (agent dentro de data) e exige que
+    // o guard rode: auditoria + métrica commit gravadas.
+    const designDoc = "docs/plans/2026-08-21-harness-verificavel-design.md"
+    const entry = createEntry({ feature: "Feature commitada", designDoc })
+    writeRegistry(statePath(), {
+      versao: 1,
+      tarefas: [
+        {
+          ...entry,
+          detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" },
+          aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+        },
+      ],
+    })
+    // Shape REAL do SDK: { data: Session, request, response } — agent em data.
+    sessionGetImpl = async () => ({ data: { agent: "code-reviewer" }, request: {}, response: {} })
+    const hooks = await makeHooks()
+
+    await expect(
+      callBefore(hooks, "bash", { command: 'git commit -m "feat: entrega"' }),
+    ).resolves.toBeUndefined()
+
+    // Auditoria VERSIONADA: 1 linha "concluida" (guard rodou de verdade).
+    const auditoria = readAudit(historyPath())
+    expect(auditoria).toHaveLength(1)
+    expect(auditoria[0]?.resultado).toBe("concluida")
+    expect(auditoria[0]?.taskId).toBe(entry.taskId)
+    // Métrica commit gravada com command + enriquecimento.
+    const commits = lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")
+    expect(commits).toHaveLength(1)
+    const detalhe = commits[0]?.["detalhe"] as Record<string, unknown>
+    expect(detalhe["command"]).toBe('git commit -m "feat: entrega"')
+    expect(detalhe["feature"]).toBe("Feature commitada")
+    expect(detalhe["designDoc"]).toBe(designDoc)
+  })
 })
 
 // ---------------------------------------------------------------------------

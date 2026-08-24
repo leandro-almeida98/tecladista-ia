@@ -88,11 +88,19 @@ describe("recordMetric + readMetrics (roundtrip)", () => {
   })
 
   test("deveNuncaThrow_quandoRecordMetricRecebePathProblematico", () => {
-    // path vazio cai no default (relativo) — não deve throw, mesmo que não crie arquivo útil
-    expect(() => recordMetric("" as unknown as string, evento("t1"))).not.toThrow()
-    // clear também nunca throw
-    expect(() => clearMetrics("/caminho/que/nao/existe/metrics.jsonl")).not.toThrow()
-    expect(() => readMetrics("/caminho/que/nao/existe/metrics.jsonl")).not.toThrow()
+    // path vazio cai no default (relativo) — não deve throw, mesmo que não crie arquivo útil.
+    // REGRESSÃO smoke 2026-08-24: sem chdir, o default resolve para o
+    // metrics.jsonl REAL do repo (CWD do vitest) e o teste ESCREVIA nele.
+    const cwdOriginal = process.cwd()
+    process.chdir(tmpDir)
+    try {
+      expect(() => recordMetric("" as unknown as string, evento("t1"))).not.toThrow()
+      // clear também nunca throw
+      expect(() => clearMetrics("/caminho/que/nao/existe/metrics.jsonl")).not.toThrow()
+      expect(() => readMetrics("/caminho/que/nao/existe/metrics.jsonl")).not.toThrow()
+    } finally {
+      process.chdir(cwdOriginal)
+    }
   })
 })
 
@@ -122,15 +130,32 @@ describe("clearMetrics", () => {
 
 describe("default path (relativo)", () => {
   test("deveUsarDefault_quandoMetricsPathNaoInformado_ouVazio", () => {
-    // funções com default param não devem throw quando chamadas sem arg (usa .opencode/pipeline/metrics.jsonl relativo ao cwd do teste)
-    // apenas verifica que não lança e retorna array (pode estar vazio ou com dados prévios do disco)
-    expect(() => readMetrics()).not.toThrow()
-    expect(() => clearMetrics()).not.toThrow()
-    // record com default não deve throw; limpa depois para não poluir
-    expect(() => recordMetric(undefined as unknown as string, evento("t-default"))).not.toThrow()
-    // limpa o default criado (se criou)
+    // REGRESSÃO REAL (smoke 2026-08-24): o default é RELATIVO ao CWD do
+    // vitest (.opencode/pipeline/metrics.jsonl). Sem chdir, clearMetrics()/
+    // recordMetric() apagavam/escreviam no metrics.jsonl REAL do repo quando
+    // o quality gate rodava `npm test`/`npm run test:coverage` — os eventos
+    // gate_run/transicao gravados pelo plugin antes do step de teste sumiam.
+    // Fix: chdir para tmpdir => o default resolve DENTRO do tmpdir e o
+    // metrics.jsonl do repo nunca é tocado.
+    const cwdOriginal = process.cwd()
+    process.chdir(tmpDir)
     try {
+      // funções com default param não devem throw quando chamadas sem arg
+      expect(() => readMetrics()).not.toThrow()
+      expect(() => clearMetrics()).not.toThrow()
+      // record com default não deve throw; grava no tmpdir (contido)
+      expect(() => recordMetric(undefined as unknown as string, evento("t-default"))).not.toThrow()
+      // default resolve para <tmpDir>/.opencode/pipeline/metrics.jsonl
+      const defaultPath = join(tmpDir, ".opencode", "pipeline", "metrics.jsonl")
+      expect(existsSync(defaultPath)).toBe(true)
+      const lidos = readMetrics(defaultPath)
+      expect(lidos).toHaveLength(1)
+      expect(lidos[0]?.taskId).toBe("t-default")
+      // limpa o default criado (dentro do tmpdir)
       clearMetrics()
-    } catch {}
+      expect(existsSync(defaultPath)).toBe(false)
+    } finally {
+      process.chdir(cwdOriginal)
+    }
   })
 })
