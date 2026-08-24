@@ -29,9 +29,14 @@ Qualquer outra alteração (scaffold do app continua pendente).
 - `node .opencode/pipeline/report.mjs --version` → imprime `0.1.0`
 - Comportamento existente (`--json`, `--path`, default) inalterado
 - `npx tsc --noEmit` exit 0 · `npx vitest run` verde (239+)
+- Smoke executado em 2026-08-23 — feature commitada em 38dbeb3 (feat: add --version flag to report cli); esta nota valida o registry mecanicamente.
 
 ## Testes
 
 Cobertura do gate roda na transição dev→reviewer (build/test/coverage reais).
 report.mjs é `.mjs` fora do glob de cobertura — verificação manual do flag
 pelo dev + suite existente verde é suficiente.
+
+## Execução
+
+- Validação mecânica executada em 2026-08-23 — registry ativo, entrada criada por hook do plugin.
