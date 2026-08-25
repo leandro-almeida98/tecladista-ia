@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes unitários dos QUALITY GATES do plugin pipeline-orchestrator
  * (helpers puros/semi-puros expostos via __internals + hooks do plugin).

@@ -2,17 +2,22 @@
   "compilerOptions": {
     "strict": true,
     "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["node"],
+    "jsx": "react-jsx",
+    "types": ["node", "@testing-library/jest-dom/vitest"],
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true
   },
   "include": [
+    "src",
+    "vite.config.ts",
+    "playwright.config.ts",
     ".opencode/plugins/**/*.ts",
     ".opencode/pipeline/**/*.ts",
     "tests/**/*.ts"

@@ -4,6 +4,10 @@ node_modules/
 dist/
 dist-ssr/
 coverage/
+*.tsbuildinfo
+# e2e
+test-results/
+playwright-report/
 # caches
 __pycache__/
 *.pyc

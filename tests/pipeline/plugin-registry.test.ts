@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes de integração do REGISTRY no plugin pipeline-orchestrator
  * (FASE 1 — harness verificável).

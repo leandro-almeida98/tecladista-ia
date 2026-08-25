@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes unitários do registry do pipeline (FASE 1 — harness verificável).
  * Módulo puro com fs real em diretório temporário (isolado por teste).

@@ -4,17 +4,31 @@
   "version": "0.1.1",
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test"
   },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.21",
     "@playwright/test": "^1.62.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.2.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
     "@vitest/coverage-v8": "^4.1.11",
+    "jsdom": "^26.0.0",
     "typescript": "^7.0.2",
+    "vite": "^7.0.0",
     "vitest": "^4.1.11"
   }
 }

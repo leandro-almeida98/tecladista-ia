@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes do LOOP DE AUTO-CORREÇÃO do quality gate (FASE 3 — harness verificável):
  *   - gate falho => registrarRetry (retryHistory + retries++) e throw [PIPELINE-RETRY];

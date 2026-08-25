@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes unitários da telemetria JSONL (FASE 5 — harness verificável).
  */

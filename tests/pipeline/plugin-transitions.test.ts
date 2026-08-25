@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes das TRANSIÇÕES MECANIZADAS do pipeline (FASE 2 — harness verificável):
  *   - planejamento→dev: design doc obrigatório (referenciado E existente);

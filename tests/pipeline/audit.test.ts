@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes unitários da auditoria VERSIONADA do pipeline (pós-FASE 5):
  * `docs/pipeline-audit/history.jsonl` é versionado no git (diferente dos

@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Testes do FIX 1 — TOKENS/CUSTO no harness:
  *   - event hook acumula tokens por sessão (message.updated + assistant);
