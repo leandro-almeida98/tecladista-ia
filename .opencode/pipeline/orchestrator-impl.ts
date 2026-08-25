@@ -104,6 +104,12 @@ import {
 } from "./registry.ts"
 import { recordMetric } from "./metrics.ts"
 import {
+  accumulateTokens,
+  getAllSessionTokens,
+  resetAllSessionTokens,
+  type TokenCounts,
+} from "./metrics.ts"
+import {
   appendAudit,
   montarAuditEntry,
   readAudit,
@@ -619,6 +625,42 @@ const DESIGN_DOC_RE = /docs\/plans\/\d{4}-\d{2}-\d{2}-[a-z0-9\-]+-design\.md/
  */
 const GIT_COMMIT_PUSH_RE = /\bgit\b[^&;]*\b(commit|push)\b/
 
+/**
+ * FIX 4.2 — SÓ `git commit` (não push): o after-hook emite auditoria "concluida"
+ * + métrica commit + flush de tokens APENAS em commit real. `git push` não é um
+ * commit novo — casar ambos (GIT_COMMIT_PUSH_RE) gerava 2 linhas "concluida" no
+ * history.jsonl + 2 commits no report p/ 1 tarefa. O before-hook guard continua
+ * usando GIT_COMMIT_PUSH_RE (bloqueia commit E push quando pré-condições faltam).
+ */
+const GIT_COMMIT_RE = /\bgit\b[^&;]*\bcommit\b/
+
+/**
+ * FIX 4 — COMMIT PÓS-EXECUÇÃO: extrai o exit code de um resultado da tool
+ * `bash` de forma TOLERANTE (o shape do SDK varia). Procura em
+ * `output.metadata.{exit,exitCode,code}` e, como fallback, no texto do output
+ * ("exit code N"). Retorna null quando não há exit code explícito (tratado
+ * como sucesso pelo chamador). NUNCA lança.
+ */
+function bashExitCode(output: unknown): number | null {
+  try {
+    const o = output as { metadata?: Record<string, unknown>; output?: unknown } | null | undefined
+    const meta = o?.metadata
+    if (meta != null && typeof meta === "object") {
+      for (const k of ["exit", "exitCode", "code"]) {
+        const v = (meta as Record<string, unknown>)[k]
+        if (typeof v === "number" && Number.isInteger(v)) return v
+      }
+    }
+    if (typeof o?.output === "string") {
+      const m = /\bexit(?: code)?[:\s]+(\d+)\b/i.exec(o.output)
+      if (m) return Number(m[1])
+    }
+  } catch {
+    // tolerante
+  }
+  return null
+}
+
 /** Pergunta relacionada a commit/push (tool question). */
 const PERGUNTA_COMMIT_PUSH_RE = /commit|push/i
 
@@ -714,6 +756,22 @@ function enriquecimentoEntrada(
 }
 
 /**
+ * FIX 2 — DURAÇÃO POR FASE: calcula `duracaoMs` de uma fase quando ela tem
+ * `iniciadoEm` + `concluidoEm` (fase concluída). Retorna undefined quando
+ * faltar algum dos timestamps ou forem inválidos (nunca inventa duração).
+ */
+function duracaoMsDaFase(fase: {
+  iniciadoEm: string
+  concluidoEm: string | null
+}): number | undefined {
+  if (!fase.concluidoEm) return undefined
+  const inicio = new Date(fase.iniciadoEm).getTime()
+  const fim = new Date(fase.concluidoEm).getTime()
+  if (!Number.isFinite(inicio) || !Number.isFinite(fim)) return undefined
+  return Math.max(0, fim - inicio)
+}
+
+/**
  * Appenda a entrada ativa no JSONL de auditoria VERSIONADO com o resultado
  * informado ("concluida" no commit; "escalada" na escala humana). Snapshot
  * opcional pós-mutação do registry (ex.: re-read após escalarHumano para
@@ -723,11 +781,15 @@ function auditarEntrada(input: {
   rootDir: string
   entry: RegistryEntry
   resultado: AuditResultado
+  tokens?: TokenCounts
 }): void {
   if (!OPTIONS.auditEnabled) return
   try {
     const auditPath = join(input.rootDir, OPTIONS.auditPath)
-    appendAudit(auditPath, montarAuditEntry(input.entry, input.resultado))
+    appendAudit(
+      auditPath,
+      montarAuditEntry(input.entry, input.resultado, new Date(), input.tokens),
+    )
   } catch {
     // auditoria nunca quebra o fluxo principal
   }
@@ -1050,6 +1112,8 @@ async function processarFalhaGate(input: {
   client: unknown
   log: GateLogger
   sourceAgent: string | null
+  /** FIX 1 — flush de tokens da sessão no flush (escala); opcional. */
+  flushTokens?: (entry: RegistryEntry | null) => TokenCounts | undefined
 }): Promise<never> {
   const sp = join(input.rootDir, OPTIONS.statePath)
   let ativa: RegistryEntry | null = null
@@ -1089,9 +1153,12 @@ async function processarFalhaGate(input: {
       snapshot =
         readRegistry(sp).tarefas.find((t) => t.taskId === ativa.taskId) ?? ativa
     } catch {}
+    // FIX 1 — flush de tokens da sessão no flush (escala): emite o evento
+    // `tokens` e devolve o total para a auditoria versionada.
+    const tokens = input.flushTokens?.(ativa)
     // Auditoria VERSIONADA (pós-FASE 5): resultado "escalada" — antes da
     // métrica; nunca quebra o fluxo (auditarEntrada/appendAudit engolem IO).
-    auditarEntrada({ rootDir: input.rootDir, entry: snapshot, resultado: "escalada" })
+    auditarEntrada({ rootDir: input.rootDir, entry: snapshot, resultado: "escalada", tokens })
     // FASE 5 — telemetria escala_humano (detalhe enriquecido)
     if (OPTIONS.metricsEnabled) {
       try {
@@ -1236,6 +1303,45 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
     }
   }
 
+  /**
+   * FIX 1 — FLUSH DE TOKENS: soma os tokens acumulados de TODAS as sessões
+   * (a fronteira de tarefa zera o acumulador na criação), emite o evento
+   * `tokens` `{taskId, tokens, cost}` e devolve o total para a auditoria.
+   * Sem tokens acumulados => não emite e retorna undefined. Nunca lança.
+   */
+  const flushTokens = (entry: RegistryEntry | null): TokenCounts | undefined => {
+    const all = getAllSessionTokens()
+    let total: TokenCounts = {
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+    }
+    let any = false
+    for (const sid of Object.keys(all)) {
+      const t = all[sid] ?? total
+      if (t.input || t.output || t.reasoning || t.cacheRead || t.cacheWrite || t.cost) {
+        total.input += t.input
+        total.output += t.output
+        total.reasoning += t.reasoning
+        total.cacheRead += t.cacheRead
+        total.cacheWrite += t.cacheWrite
+        total.cost += t.cost
+        any = true
+      }
+    }
+    resetAllSessionTokens()
+    if (!any) return undefined
+    emitMetric("tokens", entry?.taskId ?? "unknown", {
+      tokens: total,
+      cost: total.cost,
+      ...enriquecimentoEntrada(entry),
+    })
+    return total
+  }
+
   // Estado local: mapeia sessao de subagente -> nome do agente e guarda o
   // ultimo agente dev que concluiu (para rotear o gate na transicao).
   const subagentAgentBySession = new Map<string, string>()
@@ -1267,6 +1373,33 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
   }
 
   return {
+    /**
+     * FIX 1 — TOKENS/CUSTO: acumula tokens por sessão a partir do evento
+     * `message.updated` do SDK. Filtra: type === "message.updated" +
+     * info.role === "assistant" + info.tokens presente. NUNCA lança.
+     */
+    event: async ({ event }) => {
+      try {
+        if (event == null || (event as { type?: unknown }).type !== "message.updated") return
+        const info = (event as { properties?: { info?: unknown } }).properties?.info as
+          | { role?: unknown; tokens?: unknown; cost?: unknown; sessionID?: unknown }
+          | undefined
+        if (!info || info.role !== "assistant" || info.tokens == null) return
+        const sessionID = info.sessionID
+        if (typeof sessionID !== "string" || sessionID === "") return
+        const tokens = info.tokens as {
+          input?: number
+          output?: number
+          reasoning?: number
+          cache?: { read?: number; write?: number }
+        }
+        const cost = typeof info.cost === "number" ? info.cost : undefined
+        accumulateTokens(sessionID, tokens, cost)
+      } catch {
+        // nunca quebrar o fluxo
+      }
+    },
+
     /**
      * Rastreia conclusao das tasks de delegacao: registra a sessao criada e
      * o ultimo agente dev que terminou com sucesso (fonte do proximo gate).
@@ -1326,10 +1459,16 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                   ]
                 writeRegistry(sp, updateEntry(arquivo, ativa.taskId, { fases }))
                 await log("info", `[REGISTRY] fase "${faseNome}" concluida (${ativa.taskId})`)
-                // FASE 5 — transicao bem-sucedida (pós-FASE 5: enriquecida)
+                // FASE 5 — transicao bem-sucedida (pós-FASE 5: enriquecida;
+                // FIX 2: duracaoMs quando a fase concluída tem iniciadoEm+concluidoEm)
                 try {
+                  const faseConcluida = fases.find(
+                    (f) => f.nome === faseNome && f.status === "concluida",
+                  )
+                  const duracaoMs = faseConcluida ? duracaoMsDaFase(faseConcluida) : undefined
                   emitMetric("transicao", ativa.taskId, {
                     fase: faseNome,
+                    ...(duracaoMs !== undefined ? { duracaoMs } : {}),
                     ...enriquecimentoEntrada(ativa),
                   })
                 } catch {}
@@ -1398,6 +1537,55 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
             "warn",
             `[REGISTRY] falha ao registrar aprovação humana: ${err instanceof Error ? err.message : String(err)}`,
           )
+        }
+      }
+
+      // ---------------------------------------------------------------
+      // (D) FIX 4 — COMMIT PÓS-EXECUÇÃO: o before-hook guard bloqueia as
+      //     pré-condições mas NÃO emite mais. Aqui, no after-hook, quando o
+      //     comando casa git commit/push E o exit code é 0 (sucesso REAL),
+      //     emitimos a métrica `commit` + auditoria "concluida" + flush de
+      //     tokens (FIX 1). Falha de registry: apenas warn.
+      // ---------------------------------------------------------------
+      if (input.tool === "bash" && OPTIONS.registryEnabled) {
+        const command = String((input.args as { command?: unknown })?.command ?? "")
+        const agent = await currentAgent(input.sessionID)
+        if (agent === OPTIONS.targetAgent && GIT_COMMIT_RE.test(command)) {
+          const exitCode = bashExitCode(output)
+          if (exitCode === 0) {
+            try {
+              const sp = join(rootDir, OPTIONS.statePath)
+              const ativa = getActiveEntry(readRegistry(sp))
+              if (ativa) {
+                // FIX 1 — flush de tokens da sessão no flush (commit).
+                const tokens = flushTokens(ativa)
+                // Auditoria VERSIONADA: resultado "concluida" (commit real).
+                auditarEntrada({ rootDir, entry: ativa, resultado: "concluida", tokens })
+                // FASE 5 — telemetria commit (pós-execução bem-sucedida).
+                if (OPTIONS.metricsEnabled) {
+                  try {
+                    emitMetric("commit", ativa.taskId, {
+                      command,
+                      ...enriquecimentoEntrada(ativa),
+                    })
+                  } catch {}
+                }
+              }
+            } catch (err) {
+              await log(
+                "warn",
+                `[REGISTRY] falha ao auditar commit pós-execução: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
+          } else if (exitCode === null) {
+            // FIX 4.3 — FAIL-CLOSED: exit code indisponível (SDK não expôs)
+            // NÃO é sucesso. Log warn e NÃO audita "concluida" — evita
+            // registrar commit como concluído quando o resultado é desconhecido.
+            await log(
+              "warn",
+              `[PIPELINE] exit code indisponível para '${command}'; auditoria "concluida" NÃO emitida (fail-closed)`,
+            )
+          }
         }
       }
     },
@@ -1480,6 +1668,10 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
               }
               const entry = createEntry({ feature: extrairFeature(output.args), designDoc })
               writeRegistry(sp, { versao: 1, tarefas: [...(arquivo?.tarefas ?? []), entry] })
+              // FIX 1 — fronteira de tarefa: zera o acumulador de tokens para
+              // que os tokens acumulados durante esta tarefa não vazem para a
+              // próxima (flush no commit/escala soma só o desta tarefa).
+              resetAllSessionTokens()
               await log("info", `[REGISTRY] tarefa criada: ${entry.taskId} — "${entry.feature}"`)
             }
             // COM entrada ativa: reutiliza (nunca cria segunda).
@@ -1493,7 +1685,19 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
 
         if (target !== OPTIONS.targetAgent) return
 
-        const source = lastCompletedGateSource
+        // FIX 3 — SOURCE UNKNOWN: fonte do gate = memória do plugin
+        // (lastCompletedGateSource) OU fallback persistido na entrada ativa
+        // (entry.lastGateSource) quando a memória está vazia (ex.: sessão de
+        // correção spawnada via SDK que não passa pela tool `task`). Só cai
+        // em "unknown" quando ambos estão ausentes.
+        const sp = join(rootDir, OPTIONS.statePath)
+        let ativa: RegistryEntry | null = null
+        if (OPTIONS.registryEnabled) {
+          try {
+            ativa = getActiveEntry(readRegistry(sp))
+          } catch {}
+        }
+        const source = lastCompletedGateSource ?? ativa?.lastGateSource ?? null
         const gate = source
           ? QUALITY_GATES.find((g) => g.sourceAgents.includes(source))
           : OPTIONS.gateOnUnknownSource
@@ -1501,6 +1705,18 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
             : undefined
 
         if (gate) {
+          // FIX 3 — persiste a fonte conhecida na entrada ativa para servir de
+          // fallback em transições futuras sem memória. Falha de registry: warn.
+          if (OPTIONS.registryEnabled && source && ativa && ativa.lastGateSource !== source) {
+            try {
+              writeRegistry(sp, updateEntry(readRegistry(sp), ativa.taskId, { lastGateSource: source }))
+            } catch (err) {
+              void log(
+                "warn",
+                `[REGISTRY] falha ao persistir lastGateSource: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            }
+          }
           await log(
             "info",
             source
@@ -1510,17 +1726,14 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
           // FASE 5 — gate_run ao iniciar runGate (pós-FASE 5: enriquecido)
           try {
             if (OPTIONS.metricsEnabled) {
-              const sp = join(rootDir, OPTIONS.statePath)
               let taskId = "unknown"
-              let entrada: RegistryEntry | null = null
               try {
-                entrada = getActiveEntry(readRegistry(sp))
-                if (entrada) taskId = entrada.taskId
+                if (ativa) taskId = ativa.taskId
               } catch {}
               emitMetric("gate_run", taskId, {
                 gate: gate.label,
                 source: source ?? "unknown",
-                ...enriquecimentoEntrada(entrada),
+                ...enriquecimentoEntrada(ativa),
               })
             }
           } catch {}
@@ -1561,17 +1774,14 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
             // pós-FASE 5: enriquecida com feature/designDoc da entrada real)
             try {
               if (OPTIONS.metricsEnabled) {
-                const sp = join(rootDir, OPTIONS.statePath)
                 let taskId = "unknown"
-                let entrada: RegistryEntry | null = null
                 try {
-                  entrada = getActiveEntry(readRegistry(sp))
-                  if (entrada) taskId = entrada.taskId
+                  if (ativa) taskId = ativa.taskId
                 } catch {}
                 emitMetric("transicao", taskId, {
                   gate: gate.label,
                   para: OPTIONS.targetAgent,
-                  ...enriquecimentoEntrada(entrada),
+                  ...enriquecimentoEntrada(ativa),
                 })
               }
             } catch {}
@@ -1590,6 +1800,7 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 client,
                 log,
                 sourceAgent: lastCompletedGateSource,
+                flushTokens,
               })
             }
             throw gateError
@@ -1667,19 +1878,10 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
                 `para a tarefa ativa (${ativa.taskId}). Pré-condição: aprove explicitamente via question (commit/push + resposta afirmativa).`,
               )
             }
-            // Auditoria VERSIONADA (pós-FASE 5): resultado "concluida" —
-            // ANTES da métrica; nunca quebra o fluxo principal.
-            auditarEntrada({ rootDir, entry: ativa, resultado: "concluida" })
-            // FASE 5 — telemetria commit (bash guard sucesso; pós-FASE 5:
-            // detalhe enriquecido com feature/designDoc da entrada real)
-            if (OPTIONS.metricsEnabled) {
-              try {
-                emitMetric("commit", ativa.taskId, {
-                  command,
-                  ...enriquecimentoEntrada(ativa),
-                })
-              } catch {}
-            }
+            // FIX 4 — o before-hook guard APENAS BLOQUEIA as pré-condições;
+            // a métrica `commit` + auditoria "concluida" + flush de tokens
+            // agora acontecem no AFTER-hook, quando o comando de fato
+            // termina com exit code 0 (sucesso real, não apenas permissão).
           } else if (/\bgit\b/.test(command) && !ativa) {
             // git add/status/diff etc.: exige somente entrada ativa.
             throw new Error(
@@ -1744,6 +1946,7 @@ export const __internals: {
   questionAprovaPipeline: typeof questionAprovaPipeline
   DESIGN_DOC_RE: RegExp
   GIT_COMMIT_PUSH_RE: RegExp
+  GIT_COMMIT_RE: RegExp
   // loop de auto-correção (FASE 3)
   registrarRetry: typeof registrarRetry
   escalarHumano: typeof escalarHumano
@@ -1761,6 +1964,10 @@ export const __internals: {
   readAudit: typeof readAudit
   montarAuditEntry: typeof montarAuditEntry
   enriquecimentoEntrada: typeof enriquecimentoEntrada
+  // FIX 2 — duração por fase
+  duracaoMsDaFase: typeof duracaoMsDaFase
+  // FIX 4 — commit pós-execução
+  bashExitCode: typeof bashExitCode
   // constantes de configuração (readonly no nível de tipo)
   readonly QUALITY_GATES: QualityGate[]
   readonly COVERAGE_THRESHOLDS: Record<string, number>
@@ -1788,6 +1995,7 @@ export const __internals: {
   questionAprovaPipeline,
   DESIGN_DOC_RE,
   GIT_COMMIT_PUSH_RE,
+  GIT_COMMIT_RE,
   registrarRetry,
   escalarHumano,
   resetarRetries,
@@ -1802,6 +2010,8 @@ export const __internals: {
   readAudit,
   montarAuditEntry,
   enriquecimentoEntrada,
+  duracaoMsDaFase,
+  bashExitCode,
   QUALITY_GATES,
   COVERAGE_THRESHOLDS,
   OPTIONS,

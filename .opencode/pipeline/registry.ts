@@ -101,6 +101,14 @@ export interface RegistryEntry {
   aprovacaoHumana: AprovacaoHumana | null
   /** Relatório detect_changes registrado na revisão (FASE 2); null até lá. */
   detectChangesReport: DetectChangesReport | null
+  /**
+   * Última fonte de gate conhecida (FIX 3 — SOURCE UNKNOWN): agente dev que
+   * disparou o último gate desta tarefa. Persistido para servir de fallback
+   * quando a memória do plugin (lastCompletedGateSource) estiver vazia — ex.:
+   * sessão de correção spawnada via SDK que não passa pela tool `task`.
+   * null quando nunca houve gate. Tolerante a legado (undefined/null).
+   */
+  lastGateSource: string | null
 }
 
 /** Formato do state.json em disco. */
@@ -272,6 +280,12 @@ export function validateEntry(entry: unknown): void {
       )
     }
   }
+
+  // FIX 3: lastGateSource — string não vazia ou null. `undefined` tolerado por
+  // compatibilidade com entradas legadas já persistidas em disco.
+  if (e.lastGateSource !== undefined && e.lastGateSource !== null) {
+    assertNonEmptyString(e.lastGateSource, "lastGateSource")
+  }
 }
 
 // ============================================================================
@@ -388,6 +402,7 @@ export function createEntry(input: {
     retryHistory: [],
     aprovacaoHumana: null,
     detectChangesReport: null,
+    lastGateSource: null,
   }
 }
 

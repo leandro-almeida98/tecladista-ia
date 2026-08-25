@@ -25,6 +25,7 @@ import type {
   RegistryEntry,
   RetryHistoryItem,
 } from "./registry.ts"
+import type { TokenCounts } from "./metrics.ts"
 
 /** Caminho default RELATIVO à raiz do projeto. VERSIONADO no git. */
 export const DEFAULT_AUDIT_PATH = "docs/pipeline-audit/history.jsonl"
@@ -46,18 +47,21 @@ export interface AuditEntry {
   gateResults: GateResult[]
   retryHistory: RetryHistoryItem[]
   aprovacaoHumana: AprovacaoHumana | null
+  /** Tokens/custo acumulados da sessão no flush (FIX 1); ausente em legado. */
+  tokens?: TokenCounts
 }
 
 /**
  * Monta um AuditEntry a partir da RegistryEntry (snapshot raso dos arrays —
  * a entrada não é mutada depois pelo plugin). Campos ausentes em entradas
  * legadas (undefined) viram defaults seguros ([] / null).
- * `now` injetável para testes determinísticos.
+ * `now` injetável para testes determinísticos; `tokens` opcional (FIX 1).
  */
 export function montarAuditEntry(
   entry: Pick<RegistryEntry, "taskId" | "feature" | "designDoc" | "fases" | "gateResults" | "retryHistory" | "aprovacaoHumana">,
   resultado: AuditResultado,
   now: Date = new Date(),
+  tokens?: TokenCounts,
 ): AuditEntry {
   return {
     ts: now.toISOString(),
@@ -69,6 +73,7 @@ export function montarAuditEntry(
     gateResults: entry.gateResults ?? [],
     retryHistory: entry.retryHistory ?? [],
     aprovacaoHumana: entry.aprovacaoHumana ?? null,
+    ...(tokens !== undefined ? { tokens } : {}),
   }
 }
 

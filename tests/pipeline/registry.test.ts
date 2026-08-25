@@ -78,6 +78,7 @@ function validEntry(): RegistryEntry {
     aprovacaoHumana: null,
     designDoc: null,
     detectChangesReport: null,
+    lastGateSource: null,
   }
 }
 
@@ -235,6 +236,32 @@ describe("validateEntry", () => {
     expect(() => validateEntry(entry)).toThrow(/detectChangesReport/i)
   })
 
+  // ---------------- FIX 3: lastGateSource ----------------
+
+  test("deveAceitarLastGateSourceStringNaoVazia", () => {
+    const entry = validEntry()
+    entry.lastGateSource = "dev-frontend"
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveRejeitar_quandoLastGateSourceTipoInvalido", () => {
+    const entry = validEntry() as unknown as Record<string, unknown>
+    entry.lastGateSource = 42
+    expect(() => validateEntry(entry)).toThrow(/lastGateSource/i)
+  })
+
+  test("deveTolerarLastGateSourceAusente_entradaLegado", () => {
+    const entry = validEntry() as unknown as Record<string, unknown>
+    delete entry.lastGateSource
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
+  test("deveAceitarLastGateSourceNull", () => {
+    const entry = validEntry()
+    entry.lastGateSource = null
+    expect(() => validateEntry(entry)).not.toThrow()
+  })
+
   // ---------------- FASE 2: shape de CADA item de gateResults ----------------
 
   test("deveAceitarGateResultValido", () => {
@@ -306,6 +333,7 @@ describe("writeRegistry → readRegistry (roundtrip)", () => {
     entry.aprovacaoHumana = { por: "leandro", em: "2026-08-21T12:00:00.000Z" }
     entry.designDoc = "docs/plans/2026-08-21-login-design.md"
     entry.detectChangesReport = { ts: "2026-08-21T14:00:00.000Z", riskLevel: "LOW", changedCount: 3 }
+    entry.lastGateSource = "dev-frontend"
 
     writeRegistry(statePath, file)
 
@@ -327,6 +355,7 @@ describe("writeRegistry → readRegistry (roundtrip)", () => {
       riskLevel: "LOW",
       changedCount: 3,
     })
+    expect(t.lastGateSource).toBe("dev-frontend")
   })
 
   test("deveCriarDiretorioPai_quandoStatePathEmSubdiretorioInexistente", () => {
@@ -489,6 +518,11 @@ describe("createEntry", () => {
     const entry = createEntry({ feature: "Feature sem design" })
     expect(entry.designDoc).toBeNull()
     expect(entry.detectChangesReport).toBeNull()
+  })
+
+  test("deveInicializarLastGateSourceNull_quandoCriada", () => {
+    const entry = createEntry({ feature: "Feature com fonte" })
+    expect(entry.lastGateSource).toBeNull()
   })
 })
 

@@ -698,11 +698,12 @@ describe("hooks do plugin — transição de gate", () => {
 
     expect(messages().some((m) => m.includes("rodando Quality Gate FRONTEND"))).toBe(true)
 
-    // Fonte resetada no finally: segunda transição sem nova task dev => fonte
-    // desconhecida, mas gateOnUnknownSource=true => gate do frontend RODA.
+    // Fonte resetada no finally: segunda transição sem nova task dev. FIX 3 —
+    // a fonte é resolvida via entry.lastGateSource (persistida no 1º gate),
+    // então NÃO cai em "sem fonte dev rastreada"; o gate RODA de novo.
     await callBefore(hooks, "task", { subagent_type: "code-reviewer" })
     const msgs = messages()
-    expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(false)
     expect(msgs.filter((m) => m.includes("rodando Quality Gate FRONTEND")).length).toBe(2)
   })
 
@@ -715,11 +716,11 @@ describe("hooks do plugin — transição de gate", () => {
     await callAfter(hooks, { subagent_type: "dev-frontend", completed: true })
     await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).rejects.toThrow(/FALHOU/)
     // finally resetou a fonte mesmo com throw; a nova transição NÃO pula o
-    // gate: roda de novo (fonte desconhecida => gate frontend) e falha de novo.
+    // gate: roda de novo (FIX 3 — fonte via entry.lastGateSource) e falha de novo.
     await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).rejects.toThrow(
       /retry #2\/2/,
     )
-    expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    expect(messages().some((m) => m.includes("sem fonte dev rastreada"))).toBe(false)
   })
 
   test("gateOnUnknownSource_deveEstarAtivoPorDefault_camadaMecanica", () => {

@@ -20,6 +20,7 @@ import { join } from "node:path"
 
 import { PipelineOrchestrator, __internals } from "../../.opencode/pipeline/orchestrator-impl"
 import { readAudit } from "../../.opencode/pipeline/audit"
+import { resetAllSessionTokens } from "../../.opencode/pipeline/metrics"
 import {
   createEntry,
   readRegistry,
@@ -110,6 +111,12 @@ async function callAfter(
   )
 }
 
+async function callEvent(hooks: Hooks, event: unknown): Promise<void> {
+  const hook = hooks.event
+  if (!hook) throw new Error("hook event ausente")
+  await hook({ event } as never)
+}
+
 function statePath(): string {
   return join(tmpDir, ".opencode", "pipeline", "state.json")
 }
@@ -181,6 +188,8 @@ beforeEach(() => {
   existsSyncMock.mockImplementation((p: PathLike) => realFs.existsSync(p))
   execSyncMock.mockReset()
   execFileSyncMock.mockReset()
+  // acumulador de tokens é module-level (metrics.ts) — isola entre testes
+  resetAllSessionTokens()
 })
 
 afterEach(() => {
@@ -463,14 +472,18 @@ describe("FASE 3 — loop de retry do gate", () => {
     await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
 
     const msgs = messages()
-    // GATE RODA (não pula), mesmo sem fonte dev rastreada:
+    // GATE RODA (não pula), mesmo sem fonte dev rastreada na memória:
     expect(msgs.some((m) => m.includes("rodando Quality Gate FRONTEND"))).toBe(true)
-    expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(true)
+    // FIX 3 — SOURCE UNKNOWN: a fonte é resolvida via entry.lastGateSource
+    // (persistida no retry #1), então NÃO cai em "sem fonte dev rastreada".
+    expect(msgs.some((m) => m.includes("sem fonte dev rastreada"))).toBe(false)
     expect(msgs.some((m) => m.includes("gate pulado"))).toBe(false)
     // Gate passou => retries zerados (histórico preservado).
     const entry = lerEntrada()
     expect(entry.retries).toBe(0)
     expect(entry.retryHistory).toHaveLength(1)
+    // FIX 3: lastGateSource persistido na entrada.
+    expect(entry.lastGateSource).toBe("dev-frontend")
   })
 
   test("deveUnirEDeduplicarArquivosSuspeitos_noRelatorioDeEscala", async () => {
@@ -809,5 +822,41 @@ describe("Auditoria versionada (pós-FASE 5) — escala humana", () => {
     expect(detalhe["modo"]).toBe("orquestrador")
     expect(detalhe["feature"]).toBe("Feature em retry")
     expect(detalhe["designDoc"]).toBe(designDoc)
+  })
+
+  test("deveFlushTokensNaEscala_emitindoEventoTokens_eNaAuditoria (FIX 1)", async () => {
+    const entry = createEntry({ feature: "Feature tokens escala" })
+    writeRegistry(statePath(), { versao: 1, tarefas: [entry] })
+    setFsFlags({ pkg: true })
+    falharBuild()
+    const hooks = await makeHooks()
+
+    // acumula tokens via event hook (message.updated assistant)
+    await callEvent(hooks, {
+      type: "message.updated",
+      properties: {
+        info: { sessionID: "sess-retry", role: "assistant", tokens: { input: 400, output: 150, reasoning: 30, cache: { read: 10, write: 5 } }, cost: 0.09 },
+      },
+    })
+
+    await expect(falharTransicao(hooks)).rejects.toThrow(/retry #1\/2/)
+    await expect(falharTransicao(hooks)).rejects.toThrow(/retry #2\/2/)
+    await expect(falharTransicao(hooks)).rejects.toThrow(/\[PIPELINE-ESCALA\]/)
+
+    const eventos = lerJsonl(metricsPath())
+    const tokens = eventos.filter((e) => e["evento"] === "tokens")
+    expect(tokens).toHaveLength(1)
+    expect(tokens[0]?.["taskId"]).toBe(entry.taskId)
+    const det = tokens[0]?.["detalhe"] as Record<string, unknown>
+    const t = det["tokens"] as Record<string, number>
+    expect(t["input"]).toBe(400)
+    expect(t["output"]).toBe(150)
+    expect(t["cost"]).toBeCloseTo(0.09)
+
+    const auditoria = readAudit(historyPath())
+    expect(auditoria).toHaveLength(1)
+    expect(auditoria[0]?.resultado).toBe("escalada")
+    expect(auditoria[0]?.tokens?.input).toBe(400)
+    expect(auditoria[0]?.tokens?.cost).toBeCloseTo(0.09)
   })
 })

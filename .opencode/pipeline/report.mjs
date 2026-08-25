@@ -150,24 +150,72 @@ function main() {
   ]
   const featuresStr = features.length > 0 ? features.join(", ") : "N/A"
 
-  // tempo médio por fase: média de durações em transicao events que tenham duração numérica
-  let tempoMedioPorFase = null
-  let tempoMedioStr = "N/A"
-  const duracoes = []
+  // tempo médio por fase: média de durações em transicao events que tenham
+  // duração numérica, AGRUPADO por detalhe.fase (FIX 2). Sem duração => N/A.
+  const duracoesPorFase = {}
   for (const e of events) {
     if (e.evento === "transicao") {
       const d = extrairDuracao(e.detalhe)
-      if (d != null) duracoes.push(d)
+      if (d != null) {
+        const fase = e.detalhe != null && typeof e.detalhe === "object" ? e.detalhe.fase : undefined
+        const chave = typeof fase === "string" && fase !== "" ? fase : "(sem fase)"
+        if (!duracoesPorFase[chave]) duracoesPorFase[chave] = []
+        duracoesPorFase[chave].push(d)
+      }
     }
   }
-  if (duracoes.length > 0) {
-    const soma = duracoes.reduce((a, b) => a + b, 0)
-    tempoMedioPorFase = soma / duracoes.length
-    // exibe em ms se >=1, senão com 2 casas
-    tempoMedioStr = Number.isInteger(tempoMedioPorFase)
-      ? `${tempoMedioPorFase}ms (média de ${duracoes.length} transições)`
-      : `${tempoMedioPorFase.toFixed(2)}ms (média de ${duracoes.length} transições)`
+  const fasesComDuracao = Object.keys(duracoesPorFase)
+  const tempoMedioPorFase = {}
+  for (const fase of fasesComDuracao) {
+    const arr = duracoesPorFase[fase]
+    const soma = arr.reduce((a, b) => a + b, 0)
+    tempoMedioPorFase[fase] = soma / arr.length
   }
+  let tempoMedioStr = "N/A"
+  if (fasesComDuracao.length > 0) {
+    tempoMedioStr = fasesComDuracao
+      .map((fase) => {
+        const media = tempoMedioPorFase[fase]
+        const n = duracoesPorFase[fase].length
+        const valor = Number.isInteger(media) ? `${media}ms` : `${media.toFixed(2)}ms`
+        return `${fase}: ${valor} (${n} transições)`
+      })
+      .join("; ")
+  }
+
+  // FIX 1 — TOKENS/CUSTO: soma por feature + total a partir dos eventos
+  // `tokens` (detalhe.tokens = TokenCounts, detalhe.cost, detalhe.feature).
+  const tokensPorFeature = {}
+  const tokensTotal = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+  for (const e of events) {
+    if (e.evento !== "tokens") continue
+    const det = e.detalhe
+    if (det == null || typeof det !== "object") continue
+    const t = det.tokens
+    if (t == null || typeof t !== "object") continue
+    const feature = typeof det.feature === "string" && det.feature !== "" ? det.feature : "(sem feature)"
+    if (!tokensPorFeature[feature]) {
+      tokensPorFeature[feature] = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+    }
+    const alvo = tokensPorFeature[feature]
+    // NOTA (FIX 1.5): `cost` NÃO é somado do loop de keys de `tokens` — o
+    // flushTokens emite `{tokens, cost}` onde tokens.cost === detalhe.cost
+    // (MESMO valor). Somar ambos duplicaria o custo (2×). `detalhe.cost` é o
+    // canônico; tokens.cost é redundante e ignorado aqui.
+    for (const k of ["input", "output", "reasoning", "cacheRead", "cacheWrite"]) {
+      const v = typeof t[k] === "number" && Number.isFinite(t[k]) ? t[k] : 0
+      alvo[k] += v
+      tokensTotal[k] += v
+    }
+    const c = typeof det.cost === "number" && Number.isFinite(det.cost) ? det.cost : 0
+    alvo.cost += c
+    tokensTotal.cost += c
+  }
+  const temTokens = tokensTotal.input + tokensTotal.output + tokensTotal.reasoning + tokensTotal.cacheRead + tokensTotal.cacheWrite > 0 || tokensTotal.cost > 0
+  const tokensTotaisStr = temTokens
+    ? `${tokensTotal.input + tokensTotal.output + tokensTotal.reasoning} (in: ${tokensTotal.input}, out: ${tokensTotal.output})`
+    : "N/A"
+  const custoTotalStr = temTokens ? `$${tokensTotal.cost.toFixed(4)}` : "N/A"
 
   const resumo = {
     totalEventos,
@@ -186,6 +234,10 @@ function main() {
     concluidas: commit,
     escaladas: escala,
     transicao,
+    tokens: temTokens ? tokensTotal : null,
+    tokensPorFeature: temTokens ? tokensPorFeature : null,
+    tokensTotaisStr,
+    custoTotalStr,
     metricsPath,
   }
 
@@ -209,7 +261,10 @@ function main() {
         transicao,
         commit,
         escala_humano: escala,
+        tokens: counts["tokens"] ?? 0,
       },
+      tokens: temTokens ? tokensTotal : null,
+      tokensPorFeature: temTokens ? tokensPorFeature : null,
       total: totalEventos,
       distinctTasks: tasksDistintas,
     }
@@ -223,6 +278,14 @@ function main() {
     console.log(`Média de retries por tarefa: ${mediaRetriesStr} (${retry} retries / ${tasksDistintas} tasks)`)
     console.log(`Features: ${featuresStr}`)
     console.log(`Tempo médio por fase: ${tempoMedioStr}`)
+    console.log(`Tokens totais: ${tokensTotaisStr}`)
+    console.log(`Custo total: ${custoTotalStr}`)
+    if (temTokens) {
+      for (const feature of Object.keys(tokensPorFeature)) {
+        const t = tokensPorFeature[feature]
+        console.log(`  ${feature}: ${t.input + t.output + t.reasoning} tokens (in: ${t.input}, out: ${t.output}) — $${t.cost.toFixed(4)}`)
+      }
+    }
     console.log(`Tarefas concluídas vs escaladas: ${commit} vs ${escala} (commit vs escala_humano)`)
     console.log(`Breakdown por evento: ${JSON.stringify(counts)}`)
   }

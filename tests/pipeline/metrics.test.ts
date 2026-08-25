@@ -6,6 +6,13 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { clearMetrics, readMetrics, recordMetric, type MetricEvent } from "../../.opencode/pipeline/metrics"
+import {
+  accumulateTokens,
+  getAllSessionTokens,
+  getSessionTokens,
+  resetAllSessionTokens,
+  resetSessionTokens,
+} from "../../.opencode/pipeline/metrics"
 
 let tmpDir: string
 let metricsPath: string
@@ -125,6 +132,85 @@ describe("clearMetrics", () => {
     const lidos = readMetrics(metricsPath)
     expect(lidos).toHaveLength(1)
     expect(lidos[0]?.taskId).toBe("t2")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 1 — acumulador de tokens por sessão
+// ---------------------------------------------------------------------------
+describe("acumulador de tokens por sessão (FIX 1)", () => {
+  beforeEach(() => {
+    resetAllSessionTokens()
+  })
+
+  test("deveAcumularTokensPorSessao_somandoChamadas", () => {
+    accumulateTokens("s1", { input: 100, output: 50, reasoning: 10, cache: { read: 5, write: 2 } }, 0.01)
+    accumulateTokens("s1", { input: 200, output: 25 }, 0.02)
+    const t = getSessionTokens("s1")
+    expect(t.input).toBe(300)
+    expect(t.output).toBe(75)
+    expect(t.reasoning).toBe(10)
+    expect(t.cacheRead).toBe(5)
+    expect(t.cacheWrite).toBe(2)
+    expect(t.cost).toBeCloseTo(0.03)
+  })
+
+  test("deveIsolarSessoesDiferentes", () => {
+    accumulateTokens("s1", { input: 10 }, 0.5)
+    accumulateTokens("s2", { input: 99 }, 0.9)
+    expect(getSessionTokens("s1").input).toBe(10)
+    expect(getSessionTokens("s2").input).toBe(99)
+    expect(getSessionTokens("s3").input).toBe(0)
+  })
+
+  test("deveRetornarZeros_quandoSessaoNuncaAcumulou", () => {
+    expect(getSessionTokens("nao-existe")).toEqual({
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+    })
+  })
+
+  test("deveIgnorarValoresNaoNumericos_eNegativos", () => {
+    accumulateTokens("s1", { input: -5, output: "x" as unknown as number, reasoning: 3 }, -1)
+    const t = getSessionTokens("s1")
+    expect(t.input).toBe(0)
+    expect(t.output).toBe(0)
+    expect(t.reasoning).toBe(3)
+    expect(t.cost).toBe(0)
+  })
+
+  test("deveResetarUmaSessao_semAfetarOutras", () => {
+    accumulateTokens("s1", { input: 10 })
+    accumulateTokens("s2", { input: 20 })
+    resetSessionTokens("s1")
+    expect(getSessionTokens("s1").input).toBe(0)
+    expect(getSessionTokens("s2").input).toBe(20)
+  })
+
+  test("deveResetarTodasAsSessoes", () => {
+    accumulateTokens("s1", { input: 10 })
+    accumulateTokens("s2", { input: 20 })
+    resetAllSessionTokens()
+    expect(getSessionTokens("s1").input).toBe(0)
+    expect(getSessionTokens("s2").input).toBe(0)
+  })
+
+  test("deveListarTodasAsSessoesAcumuladas", () => {
+    accumulateTokens("s1", { input: 10 })
+    accumulateTokens("s2", { input: 20 })
+    const all = getAllSessionTokens()
+    expect(all["s1"]?.input).toBe(10)
+    expect(all["s2"]?.input).toBe(20)
+    expect(Object.keys(all).sort()).toEqual(["s1", "s2"])
+  })
+
+  test("deveIgnorarSessionIDVazio", () => {
+    accumulateTokens("", { input: 10 })
+    expect(getAllSessionTokens()).toEqual({})
   })
 })
 

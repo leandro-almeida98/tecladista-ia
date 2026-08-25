@@ -139,6 +139,19 @@ async function callAfterTask(
   })
 }
 
+/** FIX 4 — after-hook da tool bash (commit pós-execução). */
+async function callAfterBash(
+  hooks: Hooks,
+  opts: { command: string; exit?: number; output?: string },
+): Promise<void> {
+  const hook = hooks["tool.execute.after"]
+  if (!hook) throw new Error("hook tool.execute.after ausente")
+  await hook(
+    { tool: "bash", sessionID: "sess-1", callID: "call-1", args: { command: opts.command } } as never,
+    { title: "bash", metadata: { exit: opts.exit ?? 0 }, output: opts.output ?? "" } as never,
+  )
+}
+
 function statePath(): string {
   return join(tmpDir, ".opencode", "pipeline", "state.json")
 }
@@ -611,6 +624,7 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
   }
 
   function lerJsonl(path: string): Record<string, unknown>[] {
+    if (!realFs.existsSync(path)) return []
     return readFileSync(path, "utf-8")
       .split(/\r?\n/)
       .filter((l) => l.trim() !== "")
@@ -633,9 +647,12 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
     sessionGetImpl = async () => ({ agent: "code-reviewer" })
     const hooks = await makeHooks()
 
+    // FIX 4 — o before-hook guard APENAS bloqueia (pré-condições ok => passa);
+    // a emissão (auditoria + métrica commit) acontece no AFTER-hook com exit 0.
     await expect(
       callBefore(hooks, "bash", { command: 'git commit -m "feat: entrega"' }),
     ).resolves.toBeUndefined()
+    await callAfterBash(hooks, { command: 'git commit -m "feat: entrega"', exit: 0 })
 
     // Auditoria VERSIONADA: 1 linha resultado "concluida" com snapshot completo.
     const auditoria = readAudit(historyPath())
@@ -651,8 +668,7 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
     expect(auditoria[0]?.fases.length).toBeGreaterThan(0)
     expect(Array.isArray(auditoria[0]?.gateResults)).toBe(true)
 
-    // Métrica commit ANTES da auditoria no fluxo; ambas ocorrem. Evento
-    // commit carrega command + feature + designDoc da entrada real.
+    // Métrica commit no after-hook; evento carrega command + feature + designDoc.
     const commits = lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")
     expect(commits).toHaveLength(1)
     const detalhe = commits[0]?.["detalhe"] as Record<string, unknown>
@@ -734,9 +750,11 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
     sessionGetImpl = async () => ({ data: { agent: "code-reviewer" }, request: {}, response: {} })
     const hooks = await makeHooks()
 
+    // FIX 4 — guard roda no before (bloqueia pré-condições); emissão no after.
     await expect(
       callBefore(hooks, "bash", { command: 'git commit -m "feat: entrega"' }),
     ).resolves.toBeUndefined()
+    await callAfterBash(hooks, { command: 'git commit -m "feat: entrega"', exit: 0 })
 
     // Auditoria VERSIONADA: 1 linha "concluida" (guard rodou de verdade).
     const auditoria = readAudit(historyPath())
@@ -750,6 +768,152 @@ describe("Auditoria versionada (pós-FASE 5) — commit e transições", () => {
     expect(detalhe["command"]).toBe('git commit -m "feat: entrega"')
     expect(detalhe["feature"]).toBe("Feature commitada")
     expect(detalhe["designDoc"]).toBe(designDoc)
+  })
+
+  test("deveNaoEmitirAuditoriaNemCommit_quandoGitPush (FIX 4 — dedupe commit/push)", async () => {
+    // `git push` NÃO é um commit novo: o after-hook deve emitir auditoria +
+    // métrica commit + flush de tokens SOMENTE em `git commit`. Antes do fix,
+    // GIT_COMMIT_PUSH_RE casava push e gerava 2 linhas "concluida" p/ 1 tarefa.
+    const entry = criarTarefaAtiva("Feature push")
+    writeRegistry(statePath(), {
+      versao: 1,
+      tarefas: [
+        {
+          ...entry,
+          detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" },
+          aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+        },
+      ],
+    })
+    sessionGetImpl = async () => ({ agent: "code-reviewer" })
+    const hooks = await makeHooks()
+
+    await callAfterBash(hooks, { command: "git push origin main", exit: 0 })
+
+    // push não é commit: sem auditoria, sem métrica commit, sem flush de tokens.
+    expect(readAudit(join(tmpDir, "docs", "pipeline-audit", "history.jsonl"))).toHaveLength(0)
+    expect(lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")).toHaveLength(0)
+  })
+
+  test("deveNaoEmitirAuditoriaNemCommit_quandoExitCodeIndisponivel (FIX 4 — fail-closed)", async () => {
+    // Se o SDK não expõe exit code (null), NÃO tratar como sucesso: log warn e
+    // NÃO auditar "concluida" (fail-closed). Antes do fix, null == sucesso.
+    const entry = criarTarefaAtiva("Feature exit null")
+    writeRegistry(statePath(), {
+      versao: 1,
+      tarefas: [
+        {
+          ...entry,
+          detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" },
+          aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+        },
+      ],
+    })
+    sessionGetImpl = async () => ({ agent: "code-reviewer" })
+    const hooks = await makeHooks()
+
+    // after-hook com metadata SEM exit code (shape do SDK sem exit).
+    const hook = hooks["tool.execute.after"]
+    if (!hook) throw new Error("hook tool.execute.after ausente")
+    await hook(
+      { tool: "bash", sessionID: "sess-1", callID: "call-1", args: { command: 'git commit -m "feat"' } } as never,
+      { title: "bash", metadata: {}, output: "" } as never,
+    )
+
+    // fail-closed: sem auditoria, sem métrica commit.
+    expect(readAudit(join(tmpDir, "docs", "pipeline-audit", "history.jsonl"))).toHaveLength(0)
+    expect(lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")).toHaveLength(0)
+    // warn registrado (exit code indisponível).
+    expect(logs.some((l) => l.level === "warn" && /exit code indisponível/i.test(l.message))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 2 — duração por fase; FIX 3 — source fallback; FIX 4 — commit pós-execução
+// ---------------------------------------------------------------------------
+describe("FIX 2/3/4 — duracaoMs, source fallback, commit pós-execução", () => {
+  function metricsPath(): string {
+    return join(tmpDir, ".opencode", "pipeline", "metrics.jsonl")
+  }
+
+  function lerJsonl(path: string): Record<string, unknown>[] {
+    if (!realFs.existsSync(path)) return []
+    return readFileSync(path, "utf-8")
+      .split(/\r?\n/)
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+  }
+
+  test("deveEmitirDuracaoMs_noTransicao_quandoFaseConcluida (FIX 2)", async () => {
+    const entry = createEntry({ feature: "Feature duração" })
+    const fases = entry.fases.map((f) =>
+      f.nome === "desenvolvimento"
+        ? { ...f, iniciadoEm: new Date(Date.now() - 10_000).toISOString() }
+        : f,
+    )
+    writeRegistry(statePath(), { versao: 1, tarefas: [{ ...entry, fases }] })
+    const hooks = await makeHooks()
+
+    await callAfterTask(hooks, { subagent_type: "dev-frontend", completed: true })
+
+    const transicao = lerJsonl(metricsPath()).find((e) => e["evento"] === "transicao")
+    expect(transicao).toBeTruthy()
+    const det = transicao?.["detalhe"] as Record<string, unknown>
+    expect(det["fase"]).toBe("desenvolvimento")
+    expect(det["duracaoMs"]).toBeGreaterThanOrEqual(9000)
+  })
+
+  test("deveUsarLastGateSourceDaEntrada_comoFallback_quandoMemoriaVazia (FIX 3)", async () => {
+    const entry = createEntry({ feature: "Feature fallback" })
+    writeRegistry(statePath(), { versao: 1, tarefas: [{ ...entry, lastGateSource: "dev-frontend" }] })
+    setFsFlags({ pkg: true, compose: false, detector: false })
+    execSyncMock.mockReturnValue("ok")
+    const hooks = await makeHooks()
+
+    // SEM callAfterTask => lastCompletedGateSource null; fallback = entry.lastGateSource
+    await expect(callBefore(hooks, "task", { subagent_type: "code-reviewer" })).resolves.toBeUndefined()
+
+    const gateRun = lerJsonl(metricsPath()).find((e) => e["evento"] === "gate_run")
+    expect(gateRun).toBeTruthy()
+    const det = gateRun?.["detalhe"] as Record<string, unknown>
+    expect(det["source"]).toBe("dev-frontend")
+    expect(det["gate"]).toContain("Quality Gate FRONTEND")
+  })
+
+  test("devePersistirLastGateSource_naEntradaAtiva_quandoFonteConhecida (FIX 3)", async () => {
+    criarTarefaAtiva("Feature persistir fonte")
+    setFsFlags({ pkg: true, compose: false, detector: false })
+    execSyncMock.mockReturnValue("ok")
+    const hooks = await makeHooks()
+
+    await callAfterTask(hooks, { subagent_type: "dev-frontend", completed: true })
+    await callBefore(hooks, "task", { subagent_type: "code-reviewer" })
+
+    expect((lerTarefas()[0] as RegistryEntry).lastGateSource).toBe("dev-frontend")
+  })
+
+  test("deveNaoEmitirCommitNemAuditoria_noBeforeHook (FIX 4)", async () => {
+    const entry = criarTarefaAtiva("Feature before")
+    writeRegistry(statePath(), {
+      versao: 1,
+      tarefas: [
+        {
+          ...entry,
+          detectChangesReport: { ts: "2026-08-21T15:00:00.000Z", riskLevel: "LOW" },
+          aprovacaoHumana: { por: "usuario", em: "2026-08-21T16:00:00.000Z" },
+        },
+      ],
+    })
+    sessionGetImpl = async () => ({ agent: "code-reviewer" })
+    const hooks = await makeHooks()
+
+    await expect(
+      callBefore(hooks, "bash", { command: 'git commit -m "feat"' }),
+    ).resolves.toBeUndefined()
+
+    // before-hook guard NÃO emite mais (FIX 4): sem métrica commit nem auditoria.
+    expect(lerJsonl(metricsPath()).filter((e) => e["evento"] === "commit")).toHaveLength(0)
+    expect(readAudit(join(tmpDir, "docs", "pipeline-audit", "history.jsonl"))).toHaveLength(0)
   })
 })
 
