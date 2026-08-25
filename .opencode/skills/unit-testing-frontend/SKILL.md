@@ -416,7 +416,7 @@ Use estes caminhos como referência de organização e qualidade (frontend):
 npm test                  # vitest run (CI)
 npm run test:watch        # vitest watch (dev)
 npm run test:coverage     # vitest run --coverage (cobertura por arquivo)
-npm run test:e2e          # Cypress (E2E)
+npm run test:e2e          # Playwright (E2E)
 ```
 
 ---
@@ -451,4 +451,4 @@ npm run test:e2e          # Cypress (E2E)
 | Hook | Vitest + `renderHook` | `vi.mock` stores/APIs | `result.current`, `await waitFor` |
 | Store Zustand | Vitest | estado injetado manualmente (`useCartStore.setState` em store real ou factory mock) | estado pós-ação + efeito no componente |
 | API service | Vitest + axios mock adapter / `vi.mock` do módulo | sem rede real | payload, headers, tratamento de erro |
-| E2E (Cypress) | Cypress | app real em dev server | fluxo de usuário de ponta a ponta |
+| E2E (Playwright) | Playwright | app real em dev server | fluxo de usuário de ponta a ponta |

@@ -6,10 +6,12 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.21",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",

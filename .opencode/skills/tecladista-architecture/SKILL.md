@@ -55,5 +55,5 @@ Componente (página)
 ## 4. Testes
 
 - Unitário: Vitest + Testing Library (`src/test/setup.ts`)
-- E2E: Cypress (`npm run test:e2e`)
+- E2E: Playwright (`npm run test:e2e`)
 - Cobertura mínima: 95% POR ARQUIVO (quality gate automático)

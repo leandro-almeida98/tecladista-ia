@@ -31,9 +31,9 @@ Tools read-only do MCP GitNexus (repo `tecladista-ia`). A regra de impacto acima
 
 - **Antes de criar ou modificar testes unitários**, carregue SEMPRE a skill `unit-testing-frontend` (tool `skill` com name=`unit-testing-frontend`) — ver seção "Testes unitários — skill obrigatória" abaixo. Não pule esta etapa.
 - Toda nova funcionalidade ou alteração de comportamento frontend deve incluir testes unitários no mesmo ciclo (Vitest + Testing Library), cobrindo renderização, interação, estados vazio/erro e regressões relevantes.
-- Toda funcionalidade deve incluir ou atualizar um cenário Cypress automatizado; quando não houver tela, coordene um cenário de API pelo Cypress. Não basta testar apenas o componente isolado.
+- Toda funcionalidade deve incluir ou atualizar um cenário Playwright automatizado (`npm run test:e2e`); quando não houver tela, coordene um cenário de API pelo Playwright. Não basta testar apenas o componente isolado.
 - Trabalhe em TDD (RED → GREEN → REFACTOR); a medição de cobertura fica por conta do quality gate na transição dev → code-reviewer (meta mínima de 95% POR ARQUIVO, priorizando código novo/alterado).
-- Se o cenário Cypress não puder ser executado, pare e reporte o bloqueio ao orquestrador; não declare a funcionalidade pronta.
+- Se o cenário Playwright não puder ser executado, pare e reporte o bloqueio ao orquestrador; não declare a funcionalidade pronta.
 
 ## Testes unitários — skill obrigatória
 

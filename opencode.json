@@ -70,8 +70,8 @@
           "npm run test:coverage*": "deny",
           "npx vitest*": "deny",
           "npx vitest run*": "allow",
-          "npx cypress*": "deny",
-          "npx cypress run*": "allow",
+          "npx playwright*": "deny",
+          "npx playwright test*": "allow",
           "git commit*": "deny",
           "git push*": "deny",
           "git add*": "deny",
@@ -137,7 +137,7 @@
       "template": "Execute o comando tdd-tecladista"
     },
     "e2e": {
-      "description": "Executa testes E2E Cypress e reporta resultado",
+      "description": "Executa testes E2E Playwright e reporta resultado",
       "template": "Execute o comando e2e-tecladista"
     },
     "commit": {

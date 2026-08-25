@@ -56,7 +56,7 @@ Revisar código frontend antes de commit. Foco em:
 ### Testes
 
 - Funcionalidade nova TEM teste correspondente (TDD)
-- Matriz obrigatória por funcionalidade: testes unitários (Vitest + Testing Library) + cenário Cypress automatizado; sem tela, o Cypress testa a API
+- Matriz obrigatória por funcionalidade: testes unitários (Vitest + Testing Library) + cenário Playwright automatizado; sem tela, o Playwright testa a API
 - Testes de componente cobrem: render + interação + vazio + erro
 - Cobertura mínima verificada e reportada: 95% POR ARQUIVO, priorizando testes unitários
 - Sem `console.log` em testes — usar assertions
@@ -95,7 +95,7 @@ Achados de design entram no relatório como `[WARN]`/`[INFO]` (não bloqueiam po
 # 2. npm run build         (build Vite)
 # 3. npm test              (vitest run)
 # 4. npm run test:coverage (cobertura 95%/arquivo)
-# 5. npm run test:e2e      (Cypress)
+# 5. npm run test:e2e      (Playwright)
 ```
 
 Validar que o código passaria nessa pipeline sem erros.
@@ -119,7 +119,7 @@ Tools read-only do MCP GitNexus (repo `tecladista-ia`). Integram o fluxo de revi
 1. Receber diff do orquestrador
 2. Consumir o relatório do quality gate do plugin pipeline-orchestrator: build, testes unitários e cobertura já foram executados na transição dev → code-reviewer (e o `docker compose up -d --build` roda automaticamente após o gate aprovar, quando existir `docker-compose.yml`). Se o gate falhou, a delegação nem chega ao review. NÃO executar build/teste/cobertura manualmente — permissões do agente (`bash: deny`) não permitem e o gate já cobre esses passos.
 3. Verificar cada arquivo alterado contra as regras acima
-4. Confirmar a matriz de testes da funcionalidade: unitário + Cypress e cobertura medida (valores do relatório do gate)
+4. Confirmar a matriz de testes da funcionalidade: unitário + Playwright e cobertura medida (valores do relatório do gate)
 5. Reportar: `[CRITICAL]` (impede commit), `[WARN]`, `[INFO]`
 6. Se `[CRITICAL]` encontrado, sugerir correção e dizer "reportar ao orquestrador"
 7. Se só `[WARN]`/`[INFO]`, aprovar com ressalvas

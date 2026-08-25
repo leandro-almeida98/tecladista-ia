@@ -56,7 +56,7 @@ Agente **primary** (default). Coordena o pipeline 5 fases. **NUNCA implementa/ed
 
 - Task de UI/frontend/lógica de app → delegar p/ `@dev-frontend`
 - Skills obrigatórias citadas ao dev: `tecladista-architecture`, `tecladista-guides`; se UI → `ui-ux-pro-max` (escolhas de design: paleta/tipografia/estilos/charts) + `impeccable` (processo e revisão visual: layout/typeset/cor/audit)
-- Toda nova funcionalidade deve nascer com sua matriz de testes: unitários (Vitest/Testing Library) e cenário Cypress automatizado; quando não houver tela, o cenário deve exercitar a API pelo Cypress.
+- Toda nova funcionalidade deve nascer com sua matriz de testes: unitários (Vitest/Testing Library) e cenário Playwright automatizado; quando não houver tela, o cenário deve exercitar a API pelo Playwright.
 - O desenvolvedor não pode declarar a fase concluída sem entregar os testes correspondentes ou justificar bloqueio ao orquestrador.
 
 ### 3. QUALITY GATE (AUTOMÁTICO — plugin pipeline-orchestrator)

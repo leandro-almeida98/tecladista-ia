@@ -22,7 +22,7 @@ curl -X POST http://localhost:8080/api/v1/ai/generate-tests \
 ```
 
 ## Frameworks suportados
-- Frontend: `Vitest`, `Testing Library React`, `Cypress`
+- Frontend: `Vitest`, `Testing Library React`, `Playwright`
 - Backend: `JUnit 5`, `MockMvc`, `Testcontainers`
 
 ## Prompt padrão

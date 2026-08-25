@@ -9,7 +9,7 @@
 
 - **Stack:** App único na raiz do repo — React 19 + TypeScript strict + Vite
 - **Backend:** ainda não existe; quando houver integração, a API externa é consumida via `VITE_API_URL`
-- **Testes:** Vitest + Testing Library (unitário) + Cypress (E2E); cobertura mínima de 95% POR ARQUIVO
+- **Testes:** Vitest + Testing Library (unitário) + Playwright (E2E); cobertura mínima de 95% POR ARQUIVO
 
 ## Estrutura planejada
 
@@ -38,7 +38,7 @@ src/
 - NUNCA editar símbolo sem `gitnexus_impact` primeiro
 - NUNCA commitar sem `gitnexus_detect_changes` + revisão
 - NUNCA implementar sem testar (TDD: RED → GREEN → REFACTOR)
-- TODA nova funcionalidade deve incluir testes unitários (Vitest/Testing Library) e pelo menos um cenário automatizado no Cypress; quando não houver tela, usar cenário de API pelo Cypress
+- TODA nova funcionalidade deve incluir testes unitários (Vitest/Testing Library) e pelo menos um cenário automatizado no Playwright; quando não houver tela, usar cenário de API pelo Playwright
 - A meta mínima de cobertura é 95% POR ARQUIVO, priorizando cobertura unitária; nenhuma funcionalidade deve ser considerada concluída sem medir e reportar a cobertura
 - O quality gate automático (plugin `pipeline-orchestrator`) roda build, teste unitário e cobertura na transição dev → code-reviewer. Após o gate passar, o plugin sobe o docker compose automaticamente (`docker compose up -d --build`, configurável em `OPTIONS.composeUpOnGatePass`) quando existir `docker-compose.yml` na raiz; se ausente, o compose é pulado sem bloquear.
 - **Loop de auto-correção (FASE 3)**: gate falho registra o ciclo em `entry.retryHistory` e tenta spawn automático de correção no dev de origem via SDK; após `OPTIONS.maxRetries` (2) tentativas, a tarefa entra em `escala_humano` no registry e as delegações ficam bloqueadas até intervenção humana. Gate passando zera `retries`.
