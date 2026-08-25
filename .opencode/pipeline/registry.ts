@@ -482,6 +482,44 @@ export function registrarDetectChanges(
 }
 
 /**
+ * FINALIZA a entrada `taskId` (fix atribuição por design doc): anexa a fase
+ * "commit" com status "concluida" (agente "orquestrador", iniciadoEm =
+ * concluidoEm = agora) — fase FINAL => a entrada deixa de ser ativa (isActive
+ * false) e não contamina mais a atribuição de métricas de features futuras.
+ *
+ * IDEMPOTENTE: se a entrada já tem uma fase "commit" concluída, não duplica
+ * (retorna sem escrever). Persiste via writeRegistry. Lança se taskId
+ * inexistente.
+ */
+export function finalizarEntrada(statePath: string, taskId: string): void {
+  const arquivo = readRegistry(statePath)
+  const entry = arquivo.tarefas.find((t) => t.taskId === taskId)
+  if (!entry) {
+    throw new Error(`[PIPELINE-REGISTRY] taskId não encontrado no registry: ${taskId}`)
+  }
+  const jaTemCommitConcluido = entry.fases.some(
+    (f) => f.nome === "commit" && f.status === "concluida",
+  )
+  if (jaTemCommitConcluido) return
+  const agora = new Date().toISOString()
+  writeRegistry(
+    statePath,
+    updateEntry(arquivo, taskId, {
+      fases: [
+        ...entry.fases,
+        {
+          nome: "commit",
+          agente: "orquestrador",
+          status: "concluida" as const,
+          iniciadoEm: agora,
+          concluidoEm: agora,
+        },
+      ],
+    }),
+  )
+}
+
+/**
  * Registra aprovação humana explícita (`{por, em: agora}`) na entrada `taskId`
  * e persiste. Usado pelo after-hook da tool `question` (por: "usuario") ou por
  * registro manual do orquestrador.

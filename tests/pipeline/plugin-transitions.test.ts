@@ -23,6 +23,7 @@ import { PipelineOrchestrator, __internals } from "../../.opencode/pipeline/orch
 import { readAudit } from "../../.opencode/pipeline/audit"
 import {
   createEntry,
+  isActive,
   readRegistry,
   writeRegistry,
   type RegistryEntry,
@@ -302,6 +303,107 @@ describe("before task — design doc pré-condição (FASE 2)", () => {
       prompt: `seguir ${designDoc} à risca`,
     })
     expect((lerTarefas()[0] as RegistryEntry).designDoc).toBe(designDoc)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX — atribuição de métricas por design doc: entrada ativa com designDoc
+// DIFERENTE do designDoc da delegação => finaliza a anterior (fase commit
+// concluida, isActive false) + cria nova p/ o novo designDoc.
+// ---------------------------------------------------------------------------
+describe("before task — atribuição por design doc (fix)", () => {
+  test("deveFinalizarEntradaAnterior_eCriarNova_quandoDesignDocDiferente", async () => {
+    const designDocA = criarDesignDoc("2026-08-21-tokens-design.md")
+    const designDocB = criarDesignDoc("2026-08-22-counter-design.md")
+    const ativa = createEntry({ feature: "investigar-tokens", designDoc: designDocA })
+    writeRegistry(statePath(), { versao: 1, tarefas: [ativa] })
+    const hooks = await makeHooks()
+
+    await callBefore(hooks, "task", {
+      subagent_type: "dev-frontend",
+      description: `scaffold Counter — ${designDocB}`,
+    })
+
+    const tarefas = lerTarefas()
+    expect(tarefas).toHaveLength(2)
+    // Entrada A finalizada: fase commit concluida + isActive false.
+    const a = tarefas.find((t) => t.taskId === ativa.taskId) as RegistryEntry
+    expect(a.fases.some((f) => f.nome === "commit" && f.status === "concluida")).toBe(true)
+    expect(isActive(a)).toBe(false)
+    // Entrada B criada com o novo designDoc e ativa.
+    const b = tarefas.find((t) => t.taskId !== ativa.taskId) as RegistryEntry
+    expect(b.designDoc).toBe(designDocB)
+    expect(isActive(b)).toBe(true)
+  })
+
+  test("deveReutilizarEntrada_quandoMesmoDesignDoc", async () => {
+    const designDoc = criarDesignDoc("2026-08-21-mesmo-design.md")
+    const ativa = createEntry({ feature: "Feature A", designDoc })
+    writeRegistry(statePath(), { versao: 1, tarefas: [ativa] })
+    const hooks = await makeHooks()
+
+    await callBefore(hooks, "task", {
+      subagent_type: "dev-frontend",
+      description: `continua feature — ${designDoc}`,
+    })
+
+    const tarefas = lerTarefas()
+    expect(tarefas).toHaveLength(1)
+    expect(tarefas[0]?.taskId).toBe(ativa.taskId)
+    expect(
+      tarefas[0]?.fases.some((f) => f.nome === "commit" && f.status === "concluida"),
+    ).toBe(false)
+    expect(isActive(tarefas[0] as RegistryEntry)).toBe(true)
+  })
+
+  test("deveFinalizarEntradaLegadaSemDesignDoc_eCriarNova", async () => {
+    const designDoc = criarDesignDoc("2026-08-22-nova-design.md")
+    const ativa = createEntry({ feature: "Feature legada" }) // designDoc null
+    writeRegistry(statePath(), { versao: 1, tarefas: [ativa] })
+    const hooks = await makeHooks()
+
+    await callBefore(hooks, "task", {
+      subagent_type: "dev-frontend",
+      description: `nova feature — ${designDoc}`,
+    })
+
+    const tarefas = lerTarefas()
+    expect(tarefas).toHaveLength(2)
+    const a = tarefas.find((t) => t.taskId === ativa.taskId) as RegistryEntry
+    expect(a.fases.some((f) => f.nome === "commit" && f.status === "concluida")).toBe(true)
+    expect(isActive(a)).toBe(false)
+    const b = tarefas.find((t) => t.taskId !== ativa.taskId) as RegistryEntry
+    expect(b.designDoc).toBe(designDoc)
+    expect(isActive(b)).toBe(true)
+  })
+
+  test("deveBloquearCriacao_quandoEntradaEscalada_mesmoComAtivaDiferente", async () => {
+    const escalada = createEntry({ feature: "Feature travada" })
+    const escaladaEntry: RegistryEntry = {
+      ...escalada,
+      fases: escalada.fases.map((f) =>
+        f.nome === "desenvolvimento" ? { ...f, status: "escala_humano" as const } : f,
+      ),
+    }
+    const designDocA = criarDesignDoc("2026-08-21-ativa-design.md")
+    const ativa = createEntry({ feature: "Feature ativa", designDoc: designDocA })
+    writeRegistry(statePath(), { versao: 1, tarefas: [escaladaEntry, ativa] })
+    const hooks = await makeHooks()
+
+    const designDocB = criarDesignDoc("2026-08-22-nova-design.md")
+    await expect(
+      callBefore(hooks, "task", {
+        subagent_type: "dev-frontend",
+        description: `nova — ${designDocB}`,
+      }),
+    ).rejects.toThrow(/\[PIPELINE-ESCALA\] Existe tarefa em escala humana/)
+
+    // Nada finalizado nem criado: 2 entradas, nenhuma com fase commit concluida.
+    const tarefas = lerTarefas()
+    expect(tarefas).toHaveLength(2)
+    expect(
+      tarefas.some((t) => t.fases.some((f) => f.nome === "commit" && f.status === "concluida")),
+    ).toBe(false)
   })
 })
 

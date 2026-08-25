@@ -25,6 +25,7 @@ vi.mock("node:fs", async (importOriginal) => {
 import {
   aprovar,
   createEntry,
+  finalizarEntrada,
   getActiveEntry,
   isActive,
   readRegistry,
@@ -664,6 +665,40 @@ describe("registrarDetectChanges (FASE 2)", () => {
     expect(() =>
       registrarDetectChanges(statePath, "task-fantasma", { ts: "2026-08-21T15:00:00.000Z" }),
     ).toThrow(/task-fantasma/)
+  })
+})
+
+describe("finalizarEntrada (fix atribuição por design doc)", () => {
+  test("deveAnexarFaseCommitConcluida_ePersistir", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+
+    finalizarEntrada(statePath, taskId)
+
+    const t = readRegistry(statePath).tarefas[0] as RegistryEntry
+    const commit = t.fases.find((f) => f.nome === "commit")
+    expect(commit?.status).toBe("concluida")
+    expect(commit?.agente).toBe("orquestrador")
+    expect(commit?.iniciadoEm).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(commit?.concluidoEm).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    // Fase commit concluida é final => entrada deixa de ser ativa.
+    expect(isActive(t)).toBe(false)
+  })
+
+  test("deveSerIdempotente_naoDuplicarFaseCommit", () => {
+    writeRegistry(statePath, validFile())
+    const taskId = (validFile().tarefas[0] as RegistryEntry).taskId
+
+    finalizarEntrada(statePath, taskId)
+    finalizarEntrada(statePath, taskId)
+
+    const t = readRegistry(statePath).tarefas[0] as RegistryEntry
+    expect(t.fases.filter((f) => f.nome === "commit")).toHaveLength(1)
+  })
+
+  test("deveLancar_quandoTaskIdInexistente", () => {
+    writeRegistry(statePath, validFile())
+    expect(() => finalizarEntrada(statePath, "task-fantasma")).toThrow(/task-fantasma/)
   })
 })
 

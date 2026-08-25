@@ -89,6 +89,7 @@ import {
   aprovar,
   createEntry,
   escalarHumano,
+  finalizarEntrada,
   getActiveEntry,
   readRegistry,
   registrarDetectChanges,
@@ -1639,24 +1640,24 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
           const ativa = getActiveEntry(arquivo ?? { versao: 1, tarefas: [] })
 
           if (target === "dev-frontend") {
-            if (!ativa) {
-              // -----------------------------------------------------------
-              // PÓS-ESCALA (revisão FASE 3, WARN 2): entrada escalada fica
-              // INATIVA (fase escala_humano = final) — sem este bloqueio, a
-              // delegação ao dev criaria uma tarefa NOVA contornando a
-              // intervenção humana exigida. Qualquer entrada no registry com
-              // alguma fase em escala_humano trava a criação.
-              // -----------------------------------------------------------
-              const escalada = (arquivo?.tarefas ?? []).find((t) =>
-                t.fases.some((f) => f.status === "escala_humano"),
+            // -----------------------------------------------------------
+            // PÓS-ESCALA (revisão FASE 3, WARN 2): entrada escalada fica
+            // INATIVA (fase escala_humano = final) — sem este bloqueio, a
+            // delegação ao dev criaria uma tarefa NOVA contornando a
+            // intervenção humana exigida. Qualquer entrada no registry com
+            // alguma fase em escala_humano trava criação/finalização.
+            // -----------------------------------------------------------
+            const escalada = (arquivo?.tarefas ?? []).find((t) =>
+              t.fases.some((f) => f.status === "escala_humano"),
+            )
+            if (escalada) {
+              throw new Error(
+                `[PIPELINE-ESCALA] Existe tarefa em escala humana (${escalada.taskId}) — ` +
+                `intervenção humana obrigatória antes de iniciar nova tarefa. ` +
+                `Resolva editando/removendo a entrada em ${OPTIONS.statePath}.`,
               )
-              if (escalada) {
-                throw new Error(
-                  `[PIPELINE-ESCALA] Existe tarefa em escala humana (${escalada.taskId}) — ` +
-                  `intervenção humana obrigatória antes de iniciar nova tarefa. ` +
-                  `Resolva editando/removendo a entrada em ${OPTIONS.statePath}.`,
-                )
-              }
+            }
+            if (!ativa) {
               // FASE 2 — planejamento→dev: criação exige design doc
               // referenciado nos args E existente em disco.
               const designDoc = extrairDesignDoc(output.args)
@@ -1673,8 +1674,51 @@ export const PipelineOrchestrator: Plugin = async ({ client, directory }) => {
               // próxima (flush no commit/escala soma só o desta tarefa).
               resetAllSessionTokens()
               await log("info", `[REGISTRY] tarefa criada: ${entry.taskId} — "${entry.feature}"`)
+            } else {
+              // -----------------------------------------------------------
+              // FIX — ATRIBUIÇÃO DE MÉTRICAS POR DESIGN DOC: entrada ativa
+              // com designDoc DIFERENTE do designDoc da delegação => a
+              // feature nova NÃO pode reutilizar a entrada antiga (métricas
+              // contaminariam a feature errada). Finaliza a anterior (fase
+              // commit concluida => isActive false) e cria nova p/ o novo
+              // designDoc. Mesmo designDoc => reutiliza (continua feature).
+              // Entrada ativa SEM designDoc (legado/null) => trata como
+              // diferente (finaliza + cria nova).
+              //
+              // Delegação SEM designDoc => continua a feature ativa
+              // (comportamento legado de reutilização — não há designDoc novo
+              // para comparar nem para criar nova entrada).
+              // ---------------------------------------------------------------
+              const designDoc = extrairDesignDoc(output.args)
+              const divergente =
+                designDoc != null && ativa.designDoc !== designDoc
+              if (divergente) {
+                // Criação exige design doc referenciado E existente (mesma
+                // pré-condição da criação sem entrada ativa).
+                if (!existsSync(join(rootDir, designDoc))) {
+                  throw new Error(
+                    `[PIPELINE-REGISTRY] planejamento→dev bloqueado: pré-condição ausente — ` +
+                    `design doc aprovado em docs/plans/YYYY-MM-DD-*-design.md referenciado na tarefa.`,
+                  )
+                }
+                finalizarEntrada(sp, ativa.taskId)
+                // Re-lê o registry APÓS finalizarEntrada: o arquivo antigo
+                // (`arquivo`) ainda tem a entrada A sem a fase commit — usar
+                // ele aqui sobrescreveria a finalização. O estado atualizado
+                // preserva a entrada A finalizada + a nova entrada B.
+                const atualizado = readRegistry(sp)
+                const entry = createEntry({ feature: extrairFeature(output.args), designDoc })
+                writeRegistry(sp, { versao: 1, tarefas: [...atualizado.tarefas, entry] })
+                // FIX 1 — fronteira de tarefa (mesma razão da criação).
+                resetAllSessionTokens()
+                await log(
+                  "info",
+                  `[REGISTRY] entrada ${ativa.taskId} finalizada (designDoc divergente); ` +
+                  `tarefa criada: ${entry.taskId} — "${entry.feature}"`,
+                )
+              }
+              // mesmo designDoc (ou delegação sem designDoc) => reutiliza.
             }
-            // COM entrada ativa: reutiliza (nunca cria segunda).
           } else if (!ativa) {
             throw new Error(
               `[PIPELINE-REGISTRY] Delegação bloqueada: nenhuma tarefa ativa no registry ` +
@@ -1927,6 +1971,7 @@ export const __internals: {
   createEntry: typeof createEntry
   getActiveEntry: typeof getActiveEntry
   updateEntry: typeof updateEntry
+  finalizarEntrada: typeof finalizarEntrada
   // helpers do gate
   resolveCommand: typeof resolveCommand
   execGateStep: typeof execGateStep
@@ -1978,6 +2023,7 @@ export const __internals: {
   createEntry,
   getActiveEntry,
   updateEntry,
+  finalizarEntrada,
   resolveCommand,
   execGateStep,
   execDetectorStep,
