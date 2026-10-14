@@ -1,0 +1,6 @@
+services:
+  piano-app:
+    build: .
+    ports:
+      - "5183:80"
+    restart: unless-stopped

@@ -11,4 +11,5 @@ Status geral do projeto. Atualizar a cada fase concluída.
 | 2d | FASE 4: self-correction nos devs | CONCLUÍDO | `304ea65` |
 | 2e | FASE 5: telemetria JSONL + report | CONCLUÍDO | `df481b0` — 222 testes |
 | 2f | Demo dos 5 critérios de aceite | CONCLUÍDO | `docs/plans/2026-08-21-harness-demo.md` |
-| 3 | Scaffold app React 19 + TS + Vite (vite.config, src/, Playwright; package.json já com harness) | PENDENTE | Próximo prompt do usuário |
+| 3 | Scaffold app React 19 + TS + Vite (vite.config, src/, Playwright; package.json já com harness) | CONCLUÍDO | Scaffold na raiz |
+| 4 | Piano Learning App (Synthesia/Piano Tiles) em `tecladista-ai-src/` — Web MIDI + Canvas falling notes + Docker porta 5183 | EM ANDAMENTO | Design aprovado `docs/plans/2026-08-25-piano-app-design.md` |

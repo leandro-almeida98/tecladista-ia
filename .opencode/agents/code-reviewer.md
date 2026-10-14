@@ -6,7 +6,6 @@ temperature: 0.1
 permission:
   edit: deny
   bash:
-    "*": "deny"
     "gitnexus*": "allow"
     "git diff*": "allow"
     "git status*": "allow"
